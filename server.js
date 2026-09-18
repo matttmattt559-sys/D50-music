@@ -5,22 +5,36 @@ const path = require("path");
 const crypto = require("crypto");
 const Stripe = require("stripe");
 const { v2: cloudinary } = require("cloudinary");
+const { Pool } = require("pg");
 
 const app = express();
 const PORT = Number(process.env.PORT || 5050);
 const ROOT = __dirname;
 
-// Database configuration: change this provider when a cloud adapter is added.
-const DATABASE_PROVIDER = process.env.D50_DATABASE_PROVIDER || "local-json";
+// Render supplies DATABASE_URL when a PostgreSQL database is attached.
+// Local JSON remains available for running D50 on a personal computer.
+const DATABASE_URL = String(process.env.DATABASE_URL || "").trim();
+const DATABASE_PROVIDER = process.env.D50_DATABASE_PROVIDER ||
+  (DATABASE_URL ? "postgres" : "local-json");
 const DATABASE_CONFIG = Object.freeze({
   provider: DATABASE_PROVIDER,
   directory: process.env.D50_DATA_DIR || path.join(ROOT, "data"),
 });
-if (DATABASE_CONFIG.provider !== "local-json") {
+if (!["local-json", "postgres"].includes(DATABASE_CONFIG.provider)) {
   throw new Error(
     `Unsupported database provider: ${DATABASE_CONFIG.provider}. Add its adapter in the database setup block.`,
   );
 }
+if (DATABASE_CONFIG.provider === "postgres" && !DATABASE_URL) {
+  throw new Error("DATABASE_URL is required when D50_DATABASE_PROVIDER=postgres.");
+}
+const postgres = DATABASE_PROVIDER === "postgres"
+  ? new Pool({
+      connectionString: DATABASE_URL,
+      ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : undefined,
+    })
+  : null;
+const databaseState = new Map();
 const MUSIC_DIR = path.join(ROOT, "music");
 const COVERS_DIR = path.join(ROOT, "public", "covers");
 const CATEGORY_COVERS_DIR = path.join(ROOT, "public", "category-covers");
@@ -100,6 +114,9 @@ fs.mkdirSync(CATEGORY_COVERS_DIR, { recursive: true });
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
 function readJson(file) {
+  if (DATABASE_PROVIDER === "postgres" && databaseState.has(file)) {
+    return structuredClone(databaseState.get(file));
+  }
   try {
     return JSON.parse(fs.readFileSync(file, "utf8"));
   } catch {
@@ -154,6 +171,26 @@ async function atomicWrite(file, contents) {
   }
 }
 function writeJson(file, value) {
+  if (DATABASE_PROVIDER === "postgres") {
+    databaseState.set(file, structuredClone(value));
+    const documentName = path.basename(file, ".json");
+    const previous = writeQueues.get(file) || Promise.resolve();
+    const current = previous.catch(() => {}).then(() =>
+      postgres.query(
+        `INSERT INTO d50_documents (name, value, updated_at)
+         VALUES ($1, $2::jsonb, NOW())
+         ON CONFLICT (name) DO UPDATE
+         SET value = EXCLUDED.value, updated_at = NOW()`,
+        [documentName, JSON.stringify(value)],
+      ),
+    );
+    writeQueues.set(file, current);
+    const clearQueue = () => {
+      if (writeQueues.get(file) === current) writeQueues.delete(file);
+    };
+    current.then(clearQueue, clearQueue);
+    return current;
+  }
   const previous = writeQueues.get(file) || Promise.resolve();
   const current = previous
     .catch(() => {})
@@ -175,11 +212,35 @@ const readReports = () => readJson(REPORTS_FILE);
 const writeReports = (value) => writeJson(REPORTS_FILE, value);
 const readCodes = () => readJson(CODES_FILE);
 const writeCodes = (value) => writeJson(CODES_FILE, value);
-const storageReady = Promise.all(
-  [SONGS_FILE, CATEGORIES_FILE, USERS_FILE, REPORTS_FILE, CODES_FILE].map(async (file) => {
-    if (!fs.existsSync(file)) await atomicWrite(file, "[]\n");
-  }),
-);
+const DATA_FILES = [SONGS_FILE, CATEGORIES_FILE, USERS_FILE, REPORTS_FILE, CODES_FILE];
+const storageReady = DATABASE_PROVIDER === "postgres"
+  ? (async () => {
+      await postgres.query(`CREATE TABLE IF NOT EXISTS d50_documents (
+        name TEXT PRIMARY KEY,
+        value JSONB NOT NULL DEFAULT '[]'::jsonb,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )`);
+      for (const file of DATA_FILES) {
+        const name = path.basename(file, ".json");
+        const existing = await postgres.query(
+          "SELECT value FROM d50_documents WHERE name = $1",
+          [name],
+        );
+        if (existing.rowCount) {
+          databaseState.set(file, existing.rows[0].value);
+          continue;
+        }
+        const seed = readJson(file);
+        await postgres.query(
+          "INSERT INTO d50_documents (name, value) VALUES ($1, $2::jsonb)",
+          [name, JSON.stringify(seed)],
+        );
+        databaseState.set(file, seed);
+      }
+    })()
+  : Promise.all(DATA_FILES.map(async (file) => {
+      if (!fs.existsSync(file)) await atomicWrite(file, "[]\n");
+    }));
 async function migrateLegacyOwnership(ownerId) {
   if (!ownerId) return;
   const songs = readSongs();
@@ -264,10 +325,13 @@ async function removeUploadedFiles(files) {
   await Promise.all(
     Object.values(files || {})
       .flat()
-      .map((file) => fs.promises.unlink(file.path).catch(() => {})),
+      .map((file) => file.path
+        ? fs.promises.unlink(file.path).catch(() => {})
+        : Promise.resolve()),
   );
 }
 async function hasValidSignature(file, kind) {
+  if (file.buffer) return hasValidBufferSignature(file.buffer, file.originalname, kind);
   const handle = await fs.promises.open(file.path, "r");
   try {
     const buffer = Buffer.alloc(16);
@@ -300,6 +364,24 @@ async function hasValidSignature(file, kind) {
   } finally {
     await handle.close();
   }
+}
+
+function hasValidBufferSignature(buffer, originalName, kind) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 3) return false;
+  if (kind === "cover") {
+    const png = buffer.length >= 8 && buffer.subarray(0, 8)
+      .equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+    const jpeg = buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+    return png || jpeg;
+  }
+  const extension = path.extname(originalName).toLowerCase();
+  if (extension === ".wav")
+    return buffer.toString("ascii", 0, 4) === "RIFF" &&
+      buffer.toString("ascii", 8, 12) === "WAVE";
+  if (extension === ".m4a")
+    return buffer.length >= 12 && buffer.toString("ascii", 4, 8) === "ftyp";
+  return buffer.toString("ascii", 0, 3) === "ID3" ||
+    (buffer[0] === 0xff && (buffer[1] & 0xe0) === 0xe0);
 }
 
 function hashPassword(password, salt = crypto.randomBytes(16).toString("hex")) {
@@ -649,7 +731,7 @@ function reporterOnly(request, response, next) {
   return paidOnly(request, response, next);
 }
 
-const storage = multer.diskStorage({
+const diskStorage = multer.diskStorage({
   destination: (_request, file, done) =>
     done(
       null,
@@ -665,6 +747,28 @@ const storage = multer.diskStorage({
       `${Date.now()}-${crypto.randomUUID()}${path.extname(file.originalname).toLowerCase()}`,
     ),
 });
+// Audio is kept in memory only long enough to send it to Cloudinary. Covers
+// continue using the existing disk workflow so the current UI stays compatible.
+const storage = {
+  _handleFile(request, file, done) {
+    if (CLOUDINARY_CONFIGURED && file.fieldname === "song") {
+      const chunks = [];
+      let size = 0;
+      file.stream.on("data", (chunk) => {
+        chunks.push(chunk);
+        size += chunk.length;
+      });
+      file.stream.on("error", done);
+      file.stream.on("end", () => done(null, { buffer: Buffer.concat(chunks), size }));
+      return;
+    }
+    diskStorage._handleFile(request, file, done);
+  },
+  _removeFile(request, file, done) {
+    if (file.buffer && !file.path) return done(null);
+    diskStorage._removeFile(request, file, done);
+  },
+};
 const upload = multer({
   storage,
   limits: { fileSize: AUDIO_LIMIT, files: 2, fields: 20, parts: 22 },
@@ -708,7 +812,7 @@ function isValidMp3Buffer(buffer) {
   );
 }
 
-function uploadMp3BufferToCloudinary(file, userId) {
+function uploadAudioBufferToCloudinary(file, userId) {
   return new Promise((resolve, reject) => {
     const uploadStream = cloudinary.uploader.upload_stream(
       {
@@ -890,7 +994,7 @@ app.post(
     }
 
     try {
-      const uploaded = await uploadMp3BufferToCloudinary(
+      const uploaded = await uploadAudioBufferToCloudinary(
         request.file,
         request.user.id,
       );
@@ -1835,6 +1939,20 @@ app.post(
     const releasePendingReservation = !canPublishImmediately
       ? reserveCapacity(pendingUploadReservations, request.user.id)
       : () => {};
+    let cloudAudio = null;
+    if (CLOUDINARY_CONFIGURED) {
+      try {
+        cloudAudio = await uploadAudioBufferToCloudinary(audioFile, request.user.id);
+      } catch (error) {
+        await removeUploadedFiles(request.files);
+        releasePendingReservation();
+        console.error("Cloudinary audio upload failed:", error.message);
+        return response.status(502).json({
+          code: "CLOUDINARY_UPLOAD_FAILED",
+          error: "The audio file could not be stored. Please try again.",
+        });
+      }
+    }
     const song = {
       id: crypto.randomUUID(),
       title:
@@ -1843,7 +1961,7 @@ app.post(
           120,
         ) || "Untitled track",
       originalName: sanitizeText(audioFile.originalname, 255),
-      filename: audioFile.filename,
+      filename: audioFile.filename || null,
       mimeType: audioFile.mimetype,
       size: audioFile.size,
       createdAt: Date.now(),
@@ -1852,7 +1970,8 @@ app.post(
       uploaderName: request.user.email,
       categoryIds: categoryValidation.categoryIds,
       likedBy: [],
-      url: `/music/${encodeURIComponent(audioFile.filename)}`,
+      url: cloudAudio?.secure_url || `/music/${encodeURIComponent(audioFile.filename)}`,
+      cloudinaryPublicId: cloudAudio?.public_id || null,
       coverFilename: coverFile?.filename || null,
       coverUrl: coverFile
         ? `/covers/${encodeURIComponent(coverFile.filename)}`
@@ -1864,6 +1983,10 @@ app.post(
       await writeSongs(songs);
     } catch (error) {
       await removeUploadedFiles(request.files);
+      if (cloudAudio?.public_id)
+        await cloudinary.uploader.destroy(cloudAudio.public_id, {
+          resource_type: "video",
+        }).catch(() => {});
       throw error;
     } finally {
       releasePendingReservation();
@@ -1970,8 +2093,15 @@ app.delete("/api/songs/:id", auth, async (request, response) => {
       await writeUsers(users);
     }
   }
-  const safePath = path.join(MUSIC_DIR, path.basename(song.filename));
-  if (fs.existsSync(safePath)) fs.unlinkSync(safePath);
+  if (song.filename) {
+    const safePath = path.join(MUSIC_DIR, path.basename(song.filename));
+    if (fs.existsSync(safePath)) fs.unlinkSync(safePath);
+  }
+  if (song.cloudinaryPublicId && CLOUDINARY_CONFIGURED) {
+    await cloudinary.uploader.destroy(song.cloudinaryPublicId, {
+      resource_type: "video",
+    }).catch((error) => console.error("Cloudinary delete failed:", error.message));
+  }
   if (song.coverFilename) {
     const safeCoverPath = path.join(
       COVERS_DIR,
@@ -2246,7 +2376,11 @@ storageReady
     await migrateUserProfileFlags();
     app.listen(PORT, "0.0.0.0", () => {
       console.log(`D50 server is live on port ${PORT}`);
-      console.log(`Songs and accounts are stored permanently in ${DATA_DIR}`);
+      console.log(
+        DATABASE_PROVIDER === "postgres"
+          ? "Songs and accounts are stored permanently in PostgreSQL"
+          : `Songs and accounts are stored locally in ${DATA_DIR}`,
+      );
     });
   })
   .catch((error) => {
