@@ -1,0 +1,20 @@
+{
+  "name": "d50-local-music-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "D50 production-ready local music streaming server",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js",
+    "check": "node --check server.js && node --check public/script.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "multer": "^2.0.2",
+    "stripe": "^14.0.0"
+  }
+}
