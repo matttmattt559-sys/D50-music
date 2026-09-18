@@ -2,7 +2,7 @@
   "name": "d50-local-music-server",
   "version": "1.0.0",
   "private": true,
-  "description": "D50 production-ready local music streaming server",
+  "description": "D50 production-ready music streaming server",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {
@@ -13,9 +13,9 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
-    "cloudinary": "^2.7.0"
+    "cloudinary": "^2.7.0",
     "express": "^5.1.0",
     "multer": "^2.0.2",
-    "stripe": "^14.0.0"
+    "stripe": "^18.5.0"
   }
 }
