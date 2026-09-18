@@ -4,6 +4,7 @@ const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 const Stripe = require("stripe");
+const { v2: cloudinary } = require("cloudinary");
 
 const app = express();
 const PORT = Number(process.env.PORT || 5050);
@@ -56,6 +57,31 @@ const APP_BASE_URL = String(process.env.APP_BASE_URL || "")
   .trim()
   .replace(/\/$/, "");
 const stripe = STRIPE_SECRET_KEY ? new Stripe(STRIPE_SECRET_KEY) : null;
+const CLOUDINARY_URL = String(process.env.CLOUDINARY_URL || "").trim();
+const CLOUDINARY_CLOUD_NAME = String(
+  process.env.CLOUDINARY_CLOUD_NAME || "",
+).trim();
+const CLOUDINARY_API_KEY = String(
+  process.env.CLOUDINARY_API_KEY || "",
+).trim();
+const CLOUDINARY_API_SECRET = String(
+  process.env.CLOUDINARY_API_SECRET || "",
+).trim();
+const CLOUDINARY_CONFIGURED = Boolean(
+  CLOUDINARY_URL ||
+    (CLOUDINARY_CLOUD_NAME && CLOUDINARY_API_KEY && CLOUDINARY_API_SECRET),
+);
+if (CLOUDINARY_CLOUD_NAME && CLOUDINARY_API_KEY && CLOUDINARY_API_SECRET) {
+  cloudinary.config({
+    cloud_name: CLOUDINARY_CLOUD_NAME,
+    api_key: CLOUDINARY_API_KEY,
+    api_secret: CLOUDINARY_API_SECRET,
+    secure: true,
+  });
+} else if (CLOUDINARY_URL) {
+  // The Cloudinary SDK reads CLOUDINARY_URL directly from the environment.
+  cloudinary.config({ secure: true });
+}
 const PREMIUM_CATEGORY_LIMIT = 5;
 const CATEGORY_SONG_LIMIT = 50;
 const ADMIN_FREEZE_MS = 15 * 60 * 1000;
@@ -662,6 +688,40 @@ const upload = multer({
     );
   },
 });
+const cloudinaryAudioUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: AUDIO_LIMIT, files: 1, fields: 5, parts: 6 },
+  fileFilter: (_request, file, done) => {
+    const extension = path.extname(file.originalname).toLowerCase();
+    const validMimeTypes = new Set(["audio/mpeg", "audio/mp3", "audio/x-mpeg"]);
+    const valid = extension === ".mp3" && validMimeTypes.has(file.mimetype);
+    done(valid ? null : new Error("Only MP3 audio files are allowed."), valid);
+  },
+});
+
+function isValidMp3Buffer(buffer) {
+  return (
+    Buffer.isBuffer(buffer) &&
+    buffer.length >= 3 &&
+    (buffer.toString("ascii", 0, 3) === "ID3" ||
+      (buffer[0] === 0xff && (buffer[1] & 0xe0) === 0xe0))
+  );
+}
+
+function uploadMp3BufferToCloudinary(file, userId) {
+  return new Promise((resolve, reject) => {
+    const uploadStream = cloudinary.uploader.upload_stream(
+      {
+        resource_type: "video",
+        folder: "d50/audio",
+        public_id: `${Date.now()}-${userId}-${crypto.randomUUID()}`,
+        overwrite: false,
+      },
+      (error, result) => (error ? reject(error) : resolve(result)),
+    );
+    uploadStream.end(file.buffer);
+  });
+}
 
 app.post(
   "/webhook",
@@ -731,7 +791,7 @@ app.use((request, response, next) => {
   response.setHeader("Referrer-Policy", "no-referrer");
   response.setHeader(
     "Content-Security-Policy",
-    "default-src 'self'; script-src 'self' https://js.stripe.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://*.stripe.com; media-src 'self'; connect-src 'self' https://api.stripe.com; frame-src https://js.stripe.com https://hooks.stripe.com; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
+    "default-src 'self'; script-src 'self' https://js.stripe.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://*.stripe.com; media-src 'self' https://res.cloudinary.com; connect-src 'self' https://api.stripe.com; frame-src https://js.stripe.com https://hooks.stripe.com; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
   );
   if (
     request.path === "/" ||
@@ -801,6 +861,57 @@ app.get("/music/:filename", (request, response) => {
   response.setHeader("Content-Length", end - start + 1);
   return fs.createReadStream(file, { start, end }).pipe(response);
 });
+
+app.post(
+  "/api/cloudinary/audio",
+  auth,
+  cloudinaryAudioUpload.single("song"),
+  async (request, response) => {
+    if (!CLOUDINARY_CONFIGURED) {
+      return response.status(503).json({
+        code: "CLOUDINARY_NOT_CONFIGURED",
+        error: "Cloudinary audio storage is not configured on this server.",
+      });
+    }
+    if (request.user.banned) {
+      return response.status(403).json({
+        code: "UPLOAD_RESTRICTED",
+        error: "This account cannot upload new music.",
+      });
+    }
+    if (!request.file) {
+      return response.status(400).json({ error: "Choose an MP3 file." });
+    }
+    if (!isValidMp3Buffer(request.file.buffer)) {
+      return response.status(400).json({
+        code: "INVALID_MP3",
+        error: "The selected file is not a valid MP3 audio file.",
+      });
+    }
+
+    try {
+      const uploaded = await uploadMp3BufferToCloudinary(
+        request.file,
+        request.user.id,
+      );
+      return response.status(201).json({
+        url: uploaded.secure_url,
+        publicId: uploaded.public_id,
+        resourceType: uploaded.resource_type,
+        format: uploaded.format,
+        bytes: uploaded.bytes,
+        duration: Number(uploaded.duration || 0),
+        originalName: sanitizeText(request.file.originalname, 255),
+      });
+    } catch (error) {
+      console.error("Cloudinary MP3 upload failed:", error.message);
+      return response.status(502).json({
+        code: "CLOUDINARY_UPLOAD_FAILED",
+        error: "The MP3 could not be uploaded. Please try again.",
+      });
+    }
+  },
+);
 
 app.post("/api/auth/signup", async (request, response) => {
   const email = String(request.body.email || "")
@@ -887,7 +998,7 @@ async function createCheckoutSession(request, response) {
   try {
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
-   managed_payments: { enabled: false },
+      managed_payments: { enabled: false },
       customer_email: request.user.email,
       client_reference_id: request.user.id,
       line_items: [
