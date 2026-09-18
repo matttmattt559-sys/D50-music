@@ -887,7 +887,7 @@ async function createCheckoutSession(request, response) {
   try {
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
-      payment_method_types: ["card"],
+   
       customer_email: request.user.email,
       client_reference_id: request.user.id,
       line_items: [
