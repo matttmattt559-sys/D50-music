@@ -24,10 +24,6 @@ let pendingUploads = [];
 let pendingUploadsLoading = false;
 let pendingPreviewId = null;
 const pendingDurationCache = new Map();
-let stripeClient = null;
-let stripeElements = null;
-let stripePaymentElement = null;
-let stripeClientSecret = "";
 try {
   const savedRows = JSON.parse(
     localStorage.getItem("d50_hidden_default_rows") || "[]",
@@ -760,22 +756,10 @@ function bindAdminUi() {
   const manualBan = $("#manualBanButton");
   const banForm = $("#banAccountForm");
   const previewAudio = $("#pendingPreviewAudio");
-  const banFiltered = $("#banFilteredAccount");
-  const unbanFiltered = $("#unbanFilteredAccount");
-  const songStats = $("#songStatsLink");
-  const categoryStats = $("#categoryStatsLink");
   if (!codeForm || !manualBan || !banForm || !previewAudio) return false;
   codeForm.onsubmit = handleAdminCodeSubmit;
   manualBan.onclick = () => openBanAccountModal();
   banForm.onsubmit = handleBanAccountSubmit;
-  if (banFiltered)
-    banFiltered.onclick = () =>
-      managerAccountFilter && openBanAccountModal(managerAccountFilter);
-  if (unbanFiltered) unbanFiltered.onclick = handleUnbanFilteredAccount;
-  if (songStats)
-    songStats.onclick = () => openManagerSection("uploadedSongsSection");
-  if (categoryStats)
-    categoryStats.onclick = () => openManagerSection("categoriesManagerSection");
   previewAudio.addEventListener("ended", handlePendingPreviewEnded);
   $$("#adminHubModal .modal-close, #freeUploadsModal .modal-close, #banAccountModal .modal-close").forEach(
     (button) => (button.onclick = purgeAdminUi),
@@ -819,7 +803,9 @@ async function openBanAccountModal(target = null) {
   $("#banAccountModal").hidden = false;
   (fixedTarget ? $("#banAccountReference") : $("#banAccountEmail")).focus();
 }
-async function handleUnbanFilteredAccount() {
+$("#banFilteredAccount").onclick = () =>
+  managerAccountFilter && openBanAccountModal(managerAccountFilter);
+$("#unbanFilteredAccount").onclick = async () => {
   if (!managerAccountFilter?.banned) return;
   if (!confirm(`Unban ${managerAccountFilter.email || "this account"}?`)) return;
   const button = $("#unbanFilteredAccount");
@@ -838,7 +824,10 @@ async function handleUnbanFilteredAccount() {
   } finally {
     button.disabled = false;
   }
-}
+};
+$("#songStatsLink").onclick = () => openManagerSection("uploadedSongsSection");
+$("#categoryStatsLink").onclick = () =>
+  openManagerSection("categoriesManagerSection");
 async function deleteCategory(categoryId, categoryName) {
   if (
     !confirm(
@@ -2153,12 +2142,6 @@ function hideModals() {
   const previewAudio = $("#pendingPreviewAudio");
   if (previewAudio) previewAudio.pause();
   pendingPreviewId = null;
-  if (stripePaymentElement) {
-    stripePaymentElement.unmount();
-    stripePaymentElement = null;
-  }
-  stripeElements = null;
-  stripeClientSecret = "";
   if ($("#adminHubModal")) purgeAdminUi();
 }
 function showAccountGate() {
@@ -3139,44 +3122,32 @@ $("#authSwitch").onclick = () => {
 $("#authForm").onsubmit = async (event) => {
   event.preventDefault();
   $("#authMessage").textContent = "Please wait…";
-  const endpoint = signupMode ? "/api/auth/signup" : "/api/auth/login";
-  try {
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      credentials: "same-origin",
-      body: JSON.stringify({
-        email: $("#authEmail").value.trim(),
-        password: $("#authPassword").value,
-      }),
-    });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      $("#authMessage").textContent =
-        data.error || `Account request failed (${response.status}).`;
-      return;
-    }
-    if (!data.token || !data.user) {
-      throw new Error("The server returned an incomplete account response.");
-    }
-    sessionToken = data.token;
-    localStorage.setItem("d50_session", sessionToken);
-    user = data.user;
-    $("#authForm").reset();
-    guestPreviewActive = false;
-    audio.pause();
-    audio.removeAttribute("src");
-    audio.load();
-    currentId = null;
-    queue = [];
-    nextUpIds = [];
-    $("#now").textContent = "Choose a song";
-    syncProgress();
-    showApp();
-  } catch (error) {
-    $("#authMessage").textContent =
-      error.message || "The D50 server could not be reached.";
-  }
+  const response = await fetch(`/api/auth/${signupMode ? "signup" : "login"}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      email: $("#authEmail").value,
+      password: $("#authPassword").value,
+    }),
+  });
+  const data = await response.json();
+  if (!response.ok)
+    return ($("#authMessage").textContent =
+      data.error || "Could not continue.");
+  sessionToken = data.token;
+  localStorage.setItem("d50_session", sessionToken);
+  user = data.user;
+  $("#authForm").reset();
+  guestPreviewActive = false;
+  audio.pause();
+  audio.removeAttribute("src");
+  audio.load();
+  currentId = null;
+  queue = [];
+  nextUpIds = [];
+  $("#now").textContent = "Choose a song";
+  syncProgress();
+  showApp();
 };
 $("#accountAction").onclick = async () => {
   try {
@@ -3251,80 +3222,32 @@ $$(".modal-close").forEach(
     (button.onclick =
       button.id === "reportConfirmationClose" ? finishReportMode : hideModals),
 );
-async function startStripeCheckout() {
-  if (!user?.email) {
-    showAccountGate();
+$("#upgradeNow").onclick = () => {
+  $("#paymentModal").classList.toggle(
+    "blocking",
+    $("#premiumModal").classList.contains("blocking"),
+  );
+  $("#premiumModal").hidden = true;
+  $("#paymentModal").hidden = false;
+};
+$("#paymentForm").onsubmit = async (event) => {
+  event.preventDefault();
+  const response = await apiFetch("/api/auth/upgrade", { method: "POST" });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    alert(data.error || "Premium checkout could not be completed.");
     return;
   }
-
-  const button = $("#upgradeNow");
-  const originalText = button.textContent;
-  button.disabled = true;
-  button.textContent = "Opening Stripe…";
-
-  // The old in-app checkout is deliberately bypassed. Stripe hosts the
-  // payment page, and the server decides whether Premium is activated.
-  $("#paymentModal").hidden = true;
-  try {
-    const response = await apiFetch("/create-checkout-session", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email: user.email }),
-    });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      throw new Error(data.error || "Stripe checkout could not be started.");
-    }
-    if (!data.url || typeof data.url !== "string") {
-      throw new Error("The server did not return a Stripe checkout URL.");
-    }
-    window.location.href = data.url;
-  } catch (error) {
-    alert(error.message || "Stripe checkout could not be started.");
-    button.disabled = false;
-    button.textContent = originalText;
-  }
-}
-$("#upgradeNow").onclick = startStripeCheckout;
-
-async function resumeStripeCheckoutReturn() {
-  const params = new URLSearchParams(window.location.search);
-  const checkoutStatus = params.get("checkout");
-  if (!checkoutStatus || !sessionToken) return false;
-
-  try {
-    window.history.replaceState({}, document.title, window.location.pathname);
-
-    // Stripe can redirect back a moment before its webhook finishes. Poll the
-    // authenticated profile briefly so the dashboard receives the paid state.
-    const attempts = checkoutStatus === "success" ? 8 : 1;
-    for (let attempt = 0; attempt < attempts; attempt += 1) {
-      const response = await apiFetch("/api/auth/me");
-      if (!response.ok) throw new Error("Your account session has expired.");
-      user = await response.json();
-      if (checkoutStatus !== "success" || user.paid) break;
-      await new Promise((resolve) => setTimeout(resolve, 750));
-    }
-
-    showApp();
-    await load();
-    if (checkoutStatus === "success") {
-      alert(
-        user.paid
-          ? "Payment verified. D50 Premium is active for 30 days."
-          : "Stripe received your payment. Premium is still processing; refresh shortly.",
-      );
-    }
-    return true;
-  } catch (error) {
-    alert(error.message);
-    return false;
-  }
-}
+  user = data;
+  hideModals();
+  $("#paymentForm").reset();
+  showApp();
+  alert(
+    "Premium unlocked. This was a simulated payment — no money was charged.",
+  );
+};
 setInterval(() => {
   if (user?.adminMode === "master" && !document.hidden)
     syncPendingUploads();
 }, 3000);
-resumeStripeCheckoutReturn().then((resumed) => {
-  if (!resumed) startAsGuest();
-});
+startAsGuest();
