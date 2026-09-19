@@ -396,37 +396,6 @@
         <button id="upgradeNow" class="primary-button">Pay for Premium</button>
       </div>
     </div>
-    <div id="paymentModal" class="modal" hidden>
-      <div class="modal-card payment-card">
-        <button class="modal-close" aria-label="Close">×</button>
-        <p class="eye">SIMULATED CHECKOUT</p>
-        <h1>Unlock D50 Premium</h1>
-        <p class="mock-note">Testing only — no real payment will be taken.</p>
-        <form id="paymentForm">
-          <label
-            >Cardholder name<input required placeholder="Your name"
-          /></label>
-          <label
-            >Card number<input
-              required
-              inputmode="numeric"
-              maxlength="19"
-              placeholder="4242 4242 4242 4242"
-          /></label>
-          <div class="payment-row">
-            <label>Expiry<input required placeholder="MM/YY" /></label
-            ><label
-              >CVC<input
-                required
-                inputmode="numeric"
-                maxlength="4"
-                placeholder="123"
-            /></label>
-          </div>
-          <button class="primary-button">Complete simulated payment</button>
-        </form>
-      </div>
-    </div>
     <div id="cancelSubscriptionModal" class="modal" hidden>
       <div class="modal-card cancel-subscription-card" role="dialog" aria-modal="true" aria-labelledby="cancelSubscriptionTitle">
         <button class="modal-close" type="button" aria-label="Close">×</button>
@@ -545,6 +514,6 @@
         <p id="createCategoryMessage" class="form-message"></p>
       </div>
     </div>
-    <script src="script.js?v=20260919-2"></script>
+    <script src="script.js?v=20260919-3"></script>
   </body>
 </html>

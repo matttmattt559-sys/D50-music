@@ -3294,29 +3294,29 @@ $$(".modal-close").forEach(
     (button.onclick =
       button.id === "reportConfirmationClose" ? finishReportMode : hideModals),
 );
-$("#upgradeNow").onclick = () => {
-  $("#paymentModal").classList.toggle(
-    "blocking",
-    $("#premiumModal").classList.contains("blocking"),
-  );
-  $("#premiumModal").hidden = true;
-  $("#paymentModal").hidden = false;
-};
-$("#paymentForm").onsubmit = async (event) => {
-  event.preventDefault();
-  const response = await apiFetch("/api/auth/upgrade", { method: "POST" });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    alert(data.error || "Premium checkout could not be completed.");
-    return;
+$("#upgradeNow").onclick = async () => {
+  if (!user) return showAccountGate();
+  const button = $("#upgradeNow");
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.textContent = "Opening Stripe…";
+  try {
+    const response = await apiFetch("/api/create-checkout-session", {
+      method: "POST",
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.url) {
+      alert(data.error || "Stripe checkout could not be opened.");
+      return;
+    }
+    window.location.assign(data.url);
+  } catch (error) {
+    console.error("Stripe checkout failed:", error);
+    alert("Stripe checkout could not be opened. Please try again.");
+  } finally {
+    button.disabled = false;
+    button.textContent = originalText;
   }
-  user = data;
-  hideModals();
-  $("#paymentForm").reset();
-  showApp();
-  alert(
-    "Premium unlocked. This was a simulated payment — no money was charged.",
-  );
 };
 setInterval(() => {
   if (user?.adminMode === "master" && !document.hidden)
