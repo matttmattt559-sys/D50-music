@@ -170,19 +170,87 @@ async function atomicWrite(file, contents) {
     throw error;
   }
 }
+
+async function persistRelationalRows(file, value) {
+  const client = await postgres.connect();
+  const rows = Array.isArray(value) ? value : [];
+  const ids = rows.map((item) => String(item.id || "")).filter(Boolean);
+  try {
+    await client.query("BEGIN");
+    if (file === USERS_FILE) {
+      await client.query(
+        `INSERT INTO users (
+           id, email, password_hash, password_salt, session_token_hash,
+           role, data, created_at, updated_at
+         )
+         SELECT
+           item->>'id', LOWER(item->>'email'), item->>'passwordHash',
+           item->>'passwordSalt', item->>'sessionTokenHash',
+           COALESCE(item->>'role', 'user'), item,
+           COALESCE((item->>'createdAt')::bigint, 0), NOW()
+         FROM jsonb_array_elements($1::jsonb) AS item
+         WHERE COALESCE(item->>'id', '') <> ''
+           AND COALESCE(item->>'email', '') <> ''
+         ON CONFLICT (id) DO UPDATE SET
+           email = EXCLUDED.email,
+           password_hash = EXCLUDED.password_hash,
+           password_salt = EXCLUDED.password_salt,
+           session_token_hash = EXCLUDED.session_token_hash,
+           role = EXCLUDED.role,
+           data = EXCLUDED.data,
+           created_at = EXCLUDED.created_at,
+           updated_at = NOW()`,
+        [JSON.stringify(rows)],
+      );
+      await client.query("DELETE FROM users WHERE NOT (id = ANY($1::text[]))", [ids]);
+    } else if (file === SONGS_FILE) {
+      await client.query(
+        `INSERT INTO songs (
+           id, title, url, owner_id, status, data, created_at, updated_at
+         )
+         SELECT
+           item->>'id', COALESCE(item->>'title', 'Untitled track'),
+           item->>'url', COALESCE(item->>'ownerId', item->>'uploadedBy'),
+           COALESCE(item->>'status', 'approved'), item,
+           COALESCE((item->>'createdAt')::bigint, 0), NOW()
+         FROM jsonb_array_elements($1::jsonb) AS item
+         WHERE COALESCE(item->>'id', '') <> ''
+         ON CONFLICT (id) DO UPDATE SET
+           title = EXCLUDED.title,
+           url = EXCLUDED.url,
+           owner_id = EXCLUDED.owner_id,
+           status = EXCLUDED.status,
+           data = EXCLUDED.data,
+           created_at = EXCLUDED.created_at,
+           updated_at = NOW()`,
+        [JSON.stringify(rows)],
+      );
+      await client.query("DELETE FROM songs WHERE NOT (id = ANY($1::text[]))", [ids]);
+    }
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 function writeJson(file, value) {
   if (DATABASE_PROVIDER === "postgres") {
     databaseState.set(file, structuredClone(value));
     const documentName = path.basename(file, ".json");
     const previous = writeQueues.get(file) || Promise.resolve();
     const current = previous.catch(() => {}).then(() =>
-      postgres.query(
-        `INSERT INTO d50_documents (name, value, updated_at)
-         VALUES ($1, $2::jsonb, NOW())
-         ON CONFLICT (name) DO UPDATE
-         SET value = EXCLUDED.value, updated_at = NOW()`,
-        [documentName, JSON.stringify(value)],
-      ),
+      file === USERS_FILE || file === SONGS_FILE
+        ? persistRelationalRows(file, value)
+        : postgres.query(
+            `INSERT INTO d50_documents (name, value, updated_at)
+             VALUES ($1, $2::jsonb, NOW())
+             ON CONFLICT (name) DO UPDATE
+             SET value = EXCLUDED.value, updated_at = NOW()`,
+            [documentName, JSON.stringify(value)],
+          ),
     );
     writeQueues.set(file, current);
     const clearQueue = () => {
@@ -213,24 +281,75 @@ const writeReports = (value) => writeJson(REPORTS_FILE, value);
 const readCodes = () => readJson(CODES_FILE);
 const writeCodes = (value) => writeJson(CODES_FILE, value);
 const DATA_FILES = [SONGS_FILE, CATEGORIES_FILE, USERS_FILE, REPORTS_FILE, CODES_FILE];
+
+async function initializePostgresSchema() {
+  await postgres.query(`CREATE TABLE IF NOT EXISTS d50_documents (
+    name TEXT PRIMARY KEY,
+    value JSONB NOT NULL DEFAULT '[]'::jsonb,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`);
+  await postgres.query(`CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    email TEXT NOT NULL,
+    password_hash TEXT,
+    password_salt TEXT,
+    session_token_hash TEXT,
+    role TEXT NOT NULL DEFAULT 'user',
+    data JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at BIGINT NOT NULL DEFAULT 0,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`);
+  await postgres.query(`CREATE TABLE IF NOT EXISTS songs (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL DEFAULT 'Untitled track',
+    url TEXT,
+    owner_id TEXT,
+    status TEXT NOT NULL DEFAULT 'approved',
+    data JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at BIGINT NOT NULL DEFAULT 0,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`);
+  await postgres.query(
+    "CREATE UNIQUE INDEX IF NOT EXISTS users_email_lower_idx ON users (LOWER(email))",
+  );
+  await postgres.query(
+    "CREATE INDEX IF NOT EXISTS songs_status_created_idx ON songs (status, created_at DESC)",
+  );
+  await postgres.query(
+    "CREATE INDEX IF NOT EXISTS songs_owner_idx ON songs (owner_id)",
+  );
+}
+
 const storageReady = DATABASE_PROVIDER === "postgres"
   ? (async () => {
-      await postgres.query(`CREATE TABLE IF NOT EXISTS d50_documents (
-        name TEXT PRIMARY KEY,
-        value JSONB NOT NULL DEFAULT '[]'::jsonb,
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )`);
+      await initializePostgresSchema();
+      console.log("PostgreSQL schema ready: users and songs tables initialized");
       for (const file of DATA_FILES) {
         const name = path.basename(file, ".json");
+        if (file === USERS_FILE || file === SONGS_FILE) {
+          const table = file === USERS_FILE ? "users" : "songs";
+          const relational = await postgres.query(
+            `SELECT data FROM ${table} ORDER BY created_at ASC`,
+          );
+          if (relational.rowCount) {
+            databaseState.set(file, relational.rows.map((row) => row.data));
+            continue;
+          }
+        }
         const existing = await postgres.query(
           "SELECT value FROM d50_documents WHERE name = $1",
           [name],
         );
+        const seed = existing.rowCount ? existing.rows[0].value : readJson(file);
+        if (file === USERS_FILE || file === SONGS_FILE) {
+          await persistRelationalRows(file, seed);
+          databaseState.set(file, seed);
+          continue;
+        }
         if (existing.rowCount) {
           databaseState.set(file, existing.rows[0].value);
           continue;
         }
-        const seed = readJson(file);
         await postgres.query(
           "INSERT INTO d50_documents (name, value) VALUES ($1, $2::jsonb)",
           [name, JSON.stringify(seed)],
@@ -1756,21 +1875,17 @@ app.get("/api/songs", optionalAuth, async (request, response) => {
   if (DATABASE_PROVIDER === "postgres") {
     const [songsResult, countResult] = await Promise.all([
       postgres.query(
-        `SELECT item AS song
-         FROM d50_documents
-         CROSS JOIN LATERAL jsonb_array_elements(value) AS item
-         WHERE name = 'songs'
-           AND COALESCE(item->>'status', 'approved') = 'approved'
-         ORDER BY COALESCE((item->>'createdAt')::bigint, 0) DESC
+        `SELECT data AS song
+         FROM songs
+         WHERE status = 'approved'
+         ORDER BY created_at DESC
          LIMIT $1 OFFSET $2`,
         [limit, offset],
       ),
       postgres.query(
         `SELECT COUNT(*)::integer AS total
-         FROM d50_documents
-         CROSS JOIN LATERAL jsonb_array_elements(value) AS item
-         WHERE name = 'songs'
-           AND COALESCE(item->>'status', 'approved') = 'approved'`,
+         FROM songs
+         WHERE status = 'approved'`,
       ),
     ]);
     pageSongs = songsResult.rows.map((row) => row.song);
