@@ -181,12 +181,13 @@ async function persistRelationalRows(file, value) {
       await client.query(
         `INSERT INTO users (
            id, email, password_hash, password_salt, session_token_hash,
-           role, data, created_at, updated_at
+           role, is_admin, data, created_at, updated_at
          )
          SELECT
            item->>'id', LOWER(item->>'email'), item->>'passwordHash',
            item->>'passwordSalt', item->>'sessionTokenHash',
-           COALESCE(item->>'role', 'user'), item,
+           COALESCE(item->>'role', 'user'),
+           COALESCE((item->>'isAdmin')::boolean, false), item,
            COALESCE((item->>'createdAt')::bigint, 0), NOW()
          FROM jsonb_array_elements($1::jsonb) AS item
          WHERE COALESCE(item->>'id', '') <> ''
@@ -197,6 +198,7 @@ async function persistRelationalRows(file, value) {
            password_salt = EXCLUDED.password_salt,
            session_token_hash = EXCLUDED.session_token_hash,
            role = EXCLUDED.role,
+           is_admin = EXCLUDED.is_admin,
            data = EXCLUDED.data,
            created_at = EXCLUDED.created_at,
            updated_at = NOW()`,
@@ -295,10 +297,14 @@ async function initializePostgresSchema() {
     password_salt TEXT,
     session_token_hash TEXT,
     role TEXT NOT NULL DEFAULT 'user',
+    is_admin BOOLEAN NOT NULL DEFAULT FALSE,
     data JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at BIGINT NOT NULL DEFAULT 0,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
   )`);
+  await postgres.query(
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN NOT NULL DEFAULT FALSE",
+  );
   await postgres.query(`CREATE TABLE IF NOT EXISTS songs (
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL DEFAULT 'Untitled track',
@@ -327,9 +333,15 @@ const storageReady = DATABASE_PROVIDER === "postgres"
       for (const file of DATA_FILES) {
         const name = path.basename(file, ".json");
         if (file === USERS_FILE || file === SONGS_FILE) {
-          const table = file === USERS_FILE ? "users" : "songs";
           const relational = await postgres.query(
-            `SELECT data FROM ${table} ORDER BY created_at ASC`,
+            file === USERS_FILE
+              ? `SELECT data || jsonb_build_object(
+                   'role', role,
+                   'isAdmin', is_admin
+                 ) AS data
+                 FROM users
+                 ORDER BY created_at ASC`
+              : `SELECT data FROM songs ORDER BY created_at ASC`,
           );
           if (relational.rowCount) {
             databaseState.set(file, relational.rows.map((row) => row.data));
@@ -412,6 +424,17 @@ async function migrateUserProfileFlags() {
   const users = readUsers();
   let changed = false;
   users.forEach((user) => {
+    const hasPermanentAdminAccess = Boolean(
+      user.isAdmin || user.role === "admin" || hasRedeemedFreeAdminCode(user),
+    );
+    if (hasPermanentAdminAccess && !user.isAdmin) {
+      user.isAdmin = true;
+      changed = true;
+    }
+    if (hasPermanentAdminAccess && user.role !== "admin" && user.role !== "owner") {
+      user.role = "admin";
+      changed = true;
+    }
     if (typeof user.hasSeenUploadWarning !== "boolean") {
       user.hasSeenUploadWarning = false;
       changed = true;
@@ -574,12 +597,15 @@ function accessFor(user) {
   const trialActive = false;
   const premiumExpiresAt = premiumExpiryFor(user, now);
   const paid = Boolean(user.paid && premiumExpiresAt > now);
+  const permanentAdmin = Boolean(
+    user.isAdmin || user.role === "admin" || hasRedeemedFreeAdminCode(user),
+  );
   const adminMode = user.isAdminBanned
     ? null
-    : user.adminMode === "free" && hasRedeemedFreeAdminCode(user)
-      ? "free"
-      : user.adminMode === "master" || user.adminMode === true
-        ? "master"
+    : user.adminMode === "master" || user.adminMode === true
+      ? "master"
+      : permanentAdmin
+        ? "free"
         : null;
   return {
     paid,
@@ -632,6 +658,7 @@ function publicUser(user) {
     id: user.id,
     email: user.email,
     role: user.role,
+    isAdmin: Boolean(user.isAdmin || user.role === "admin"),
     banned: Boolean(user.banned),
     hasSeenUploadWarning: Boolean(user.hasSeenUploadWarning),
     adminFailedAttempts: Number(user.adminFailedAttempts || 0),
@@ -1191,7 +1218,12 @@ app.post("/api/auth/login", async (request, response) => {
     return response.status(401).json({ error: "Incorrect email or password." });
   const token = crypto.randomBytes(32).toString("hex");
   normalizePremiumExpiration(user);
-  user.adminMode = hasRedeemedFreeAdminCode(user) ? "free" : false;
+  const permanentAdmin = Boolean(
+    user.isAdmin || user.role === "admin" || hasRedeemedFreeAdminCode(user),
+  );
+  user.isAdmin = permanentAdmin;
+  if (permanentAdmin && user.role !== "owner") user.role = "admin";
+  user.adminMode = permanentAdmin ? "free" : false;
   user.sessionTokenHash = tokenHash(token);
   await writeUsers(
     readUsers().map((item) => (item.id === user.id ? user : item)),
@@ -1513,6 +1545,8 @@ app.post("/api/admin/unlock", auth, async (request, response) => {
     invite.redeemedByEmail = user.email;
     invite.redeemedAt = Date.now();
     user.freeAdminCodeId = invite.id;
+    user.isAdmin = true;
+    if (user.role !== "owner") user.role = "admin";
   }
   await Promise.all([writeUsers(users), invite ? writeCodes(codes) : null]);
   response.json(publicUser(user));
@@ -1635,6 +1669,8 @@ app.delete("/api/admin/access-codes/:id", auth, masterOnly, async (request, resp
   users.forEach((account) => {
     if (account.freeAdminCodeId !== code.id) return;
     account.adminMode = false;
+    account.isAdmin = false;
+    if (account.role === "admin") account.role = "user";
     delete account.freeAdminCodeId;
   });
   await Promise.all([
