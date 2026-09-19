@@ -1740,13 +1740,54 @@ app.post(
   },
 );
 
-app.get("/api/songs", optionalAuth, (request, response) => {
-  response.json(
-    readSongs()
+app.get("/api/songs", optionalAuth, async (request, response) => {
+  const requestedPage = Number.parseInt(request.query.page, 10);
+  const requestedLimit = Number.parseInt(request.query.limit, 10);
+  const page = Number.isSafeInteger(requestedPage) && requestedPage > 0
+    ? requestedPage
+    : 1;
+  const limit = Number.isSafeInteger(requestedLimit) && requestedLimit > 0
+    ? Math.min(requestedLimit, 100)
+    : 20;
+  const offset = (page - 1) * limit;
+
+  let pageSongs;
+  let total;
+  if (DATABASE_PROVIDER === "postgres") {
+    const [songsResult, countResult] = await Promise.all([
+      postgres.query(
+        `SELECT item AS song
+         FROM d50_documents
+         CROSS JOIN LATERAL jsonb_array_elements(value) AS item
+         WHERE name = 'songs'
+           AND COALESCE(item->>'status', 'approved') = 'approved'
+         ORDER BY COALESCE((item->>'createdAt')::bigint, 0) DESC
+         LIMIT $1 OFFSET $2`,
+        [limit, offset],
+      ),
+      postgres.query(
+        `SELECT COUNT(*)::integer AS total
+         FROM d50_documents
+         CROSS JOIN LATERAL jsonb_array_elements(value) AS item
+         WHERE name = 'songs'
+           AND COALESCE(item->>'status', 'approved') = 'approved'`,
+      ),
+    ]);
+    pageSongs = songsResult.rows.map((row) => row.song);
+    total = Number(countResult.rows[0]?.total || 0);
+  } else {
+    const approvedSongs = readSongs()
       .filter((song) => !song.status || song.status === "approved")
-      .sort((a, b) => b.createdAt - a.createdAt)
-      .map((song) => publicSong(song, request.user)),
-  );
+      .sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
+    total = approvedSongs.length;
+    pageSongs = approvedSongs.slice(offset, offset + limit);
+  }
+
+  response.setHeader("X-Page", String(page));
+  response.setHeader("X-Limit", String(limit));
+  response.setHeader("X-Total-Count", String(total));
+  response.setHeader("X-Has-More", String(offset + pageSongs.length < total));
+  response.json(pageSongs.map((song) => publicSong(song, request.user)));
 });
 
 app.get("/api/my-uploads", auth, (request, response) => {
