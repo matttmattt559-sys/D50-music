@@ -3559,3 +3559,14 @@ footer > input {
     justify-self: start;
   }
 }
+.song-load-sentinel {
+  min-height: 72px;
+  display: grid;
+  place-items: center;
+  color: var(--muted, #8f91a8);
+  font-size: 0.85rem;
+}
+
+.song-load-sentinel[hidden] {
+  display: none;
+}

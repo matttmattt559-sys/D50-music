@@ -23,6 +23,10 @@ let managerCategoryPriority = null;
 let pendingUploads = [];
 let pendingUploadsLoading = false;
 let pendingPreviewId = null;
+const SONG_PAGE_SIZE = 20;
+let songPage = 0;
+let songsHaveMore = false;
+let songsPageLoading = false;
 const pendingDurationCache = new Map();
 try {
   const savedRows = JSON.parse(
@@ -591,7 +595,7 @@ async function syncCreatorStats() {
   if (!user || document.hidden) return;
   try {
     const [songsResponse, categoriesResponse, profileResponse] = await Promise.all([
-      apiFetch("/api/songs"),
+      apiFetch(`/api/songs?page=1&limit=${SONG_PAGE_SIZE}`),
       apiFetch("/api/categories"),
       apiFetch("/api/auth/me"),
     ]);
@@ -1847,8 +1851,12 @@ function renderCategories() {
   }
 }
 async function load() {
+  songPage = 0;
+  songsHaveMore = true;
+  songsPageLoading = true;
+  updateSongLoadStatus();
   const [songsResponse, categoriesResponse, uploadsResponse] = await Promise.all([
-    apiFetch("/api/songs"),
+    apiFetch(`/api/songs?page=1&limit=${SONG_PAGE_SIZE}`),
     apiFetch("/api/categories"),
     user ? apiFetch("/api/my-uploads") : Promise.resolve(null),
   ]);
@@ -1865,10 +1873,60 @@ async function load() {
     songsResponse.json(),
     categoriesResponse.json(),
   ]);
+  songPage = 1;
+  songsHaveMore = songsResponse.headers.get("X-Has-More") === "true";
+  songsPageLoading = false;
   managedUploads = uploadsResponse ? await uploadsResponse.json() : [];
   syncFreeUploadCapacityFromManagedUploads();
   render();
+  updateSongLoadStatus();
 }
+
+function updateSongLoadStatus(message = "") {
+  const sentinel = $("#songLoadSentinel");
+  const status = $("#songLoadStatus");
+  if (!sentinel || !status) return;
+  sentinel.hidden = !songsHaveMore && !songsPageLoading;
+  status.textContent = message || (songsPageLoading
+    ? "Loading more songs…"
+    : songsHaveMore
+      ? "Scroll to load more songs"
+      : "All songs loaded");
+}
+
+async function loadNextSongPage() {
+  if (songsPageLoading || !songsHaveMore) return;
+  songsPageLoading = true;
+  updateSongLoadStatus();
+  const nextPage = songPage + 1;
+  try {
+    const response = await apiFetch(
+      `/api/songs?page=${nextPage}&limit=${SONG_PAGE_SIZE}`,
+    );
+    if (!response.ok) throw new Error("Could not load more songs.");
+    const nextSongs = await response.json();
+    const knownIds = new Set(songs.map((song) => song.id));
+    songs.push(...nextSongs.filter((song) => !knownIds.has(song.id)));
+    songPage = nextPage;
+    songsHaveMore = response.headers.get("X-Has-More") === "true";
+    render();
+  } catch (error) {
+    console.error(error);
+    updateSongLoadStatus("Could not load more songs. Scroll away and try again.");
+  } finally {
+    songsPageLoading = false;
+    updateSongLoadStatus();
+  }
+}
+
+const songLoadObserver = new IntersectionObserver(
+  (entries) => {
+    if (entries.some((entry) => entry.isIntersecting)) loadNextSongPage();
+  },
+  { rootMargin: "600px 0px" },
+);
+const songLoadSentinel = $("#songLoadSentinel");
+if (songLoadSentinel) songLoadObserver.observe(songLoadSentinel);
 $("#createCategory").onclick = () => {
   if (!user) return showAuth(true);
   if (!user.canCreateCategories) return showPremium();
