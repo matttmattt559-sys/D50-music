@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width" />
     <title>D50</title>
-    <link rel="stylesheet" href="style.css?v=20260917-12" />
+    <link rel="stylesheet" href="style.css?v=20260919-1" />
   </head>
   <body class="dashboard-active">
     <div id="authScreen" class="auth-screen" hidden aria-hidden="true">
@@ -358,30 +358,45 @@
         </div>
       </div>
     </section>
-    <footer>
+    <footer class="player-footer">
       <div class="now">
         ◎ <span><b id="now">Choose a song</b><small>Local catalog</small></span>
         <button id="playerLike" class="heart">♡</button>
       </div>
       <div class="controls">
-        <div>
+        <div class="transport-controls">
           <button id="shuffle" class="skip" aria-label="Shuffle">🔀</button>
           <button id="prev" class="skip" aria-label="Previous song">⏮</button>
           <button id="play" aria-label="Play">▶</button>
           <button id="next" class="skip" aria-label="Next song">⏭</button>
         </div>
         <div class="timeline">
-          <input
-            id="seek"
-            type="range"
-            min="0"
-            max="0"
-            step="0.01"
-            value="0"
-          /><b id="timer">0:00 / 0:00</b>
+          <div class="progress-bar-wrapper">
+            <input
+              id="seek"
+              type="range"
+              min="0"
+              max="0"
+              step="0.01"
+              value="0"
+              aria-label="Song progress"
+            />
+          </div>
+          <b id="timer">0:00 / 0:00</b>
         </div>
       </div>
-      <input id="volume" type="range" value="68" /><audio id="audio"></audio>
+      <div class="volume-control">
+        <span aria-hidden="true">🔊</span>
+        <input
+          id="volume"
+          type="range"
+          min="0"
+          max="100"
+          value="68"
+          aria-label="Volume"
+        />
+      </div>
+      <audio id="audio"></audio>
     </footer>
     <div id="premiumModal" class="modal" hidden>
       <div class="modal-card">
