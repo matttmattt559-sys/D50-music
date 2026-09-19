@@ -3151,16 +3151,30 @@ $("#authClose").onclick = closeAuthGate;
 $("#authScreen").onclick = (event) => {
   if (event.target === $("#authScreen")) closeAuthGate();
 };
-async function startAsGuest() {
-  try {
-    await apiFetch("/api/auth/logout", { method: "POST" });
-  } catch {
-    // The browser session is cleared locally even if the server is unavailable.
+async function restoreSavedSession() {
+  if (!sessionToken) {
+    showGuestApp();
+    return;
   }
-  sessionToken = "";
-  localStorage.removeItem("d50_session");
-  guestListenCount = 0;
-  localStorage.setItem("d50_guest_listens", "0");
+
+  try {
+    const response = await apiFetch("/api/auth/me", { cache: "no-store" });
+    if (response.ok) {
+      user = await response.json();
+      showApp();
+      return;
+    }
+
+    // Only remove a saved token when the server confirms that it is invalid.
+    if (response.status === 401 || response.status === 403) {
+      sessionToken = "";
+      localStorage.removeItem("d50_session");
+    }
+  } catch (error) {
+    // Keep the local token during temporary network or Render wake-up errors.
+    console.error("Could not restore the saved session:", error);
+  }
+
   showGuestApp();
 }
 $("#authSwitch").onclick = () => {
@@ -3308,4 +3322,4 @@ setInterval(() => {
   if (user?.adminMode === "master" && !document.hidden)
     syncPendingUploads();
 }, 3000);
-startAsGuest();
+restoreSavedSession();
