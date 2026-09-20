@@ -74,16 +74,19 @@ const STRIPE_PAYMENT_LINK_URL = String(
 const STRIPE_PAYMENT_LINK_ID = String(
   process.env.STRIPE_PAYMENT_LINK_ID || "",
 ).trim();
+const STRIPE_DUO_LINK_URL = String(
+  process.env.STRIPE_DUO_LINK_URL || "",
+).trim();
 const APP_BASE_URL = String(process.env.APP_BASE_URL || "")
   .trim()
   .replace(/\/$/, "");
 const stripe = STRIPE_SECRET_KEY ? new Stripe(STRIPE_SECRET_KEY) : null;
 
-function buildStripePaymentLinkUrl(user) {
-  if (!STRIPE_PAYMENT_LINK_URL) return "";
+function buildStripePaymentLinkUrl(linkUrl, user) {
+  if (!linkUrl) return "";
 
   try {
-    const paymentUrl = new URL(STRIPE_PAYMENT_LINK_URL);
+    const paymentUrl = new URL(linkUrl);
     if (
       paymentUrl.protocol !== "https:" ||
       paymentUrl.hostname !== "buy.stripe.com"
@@ -208,13 +211,15 @@ async function persistRelationalRows(file, value) {
       await client.query(
         `INSERT INTO users (
            id, email, password_hash, password_salt, session_token_hash,
-           role, is_admin, data, created_at, updated_at
+           role, is_admin, is_slot_member, premium_source, data, created_at, updated_at
          )
          SELECT
            item->>'id', LOWER(item->>'email'), item->>'passwordHash',
            item->>'passwordSalt', item->>'sessionTokenHash',
            COALESCE(item->>'role', 'user'),
-           COALESCE((item->>'isAdmin')::boolean, false), item,
+           COALESCE((item->>'isAdmin')::boolean, false),
+           COALESCE((item->>'isSlotMember')::boolean, false),
+           NULLIF(item->>'premiumSource', ''), item,
            COALESCE((item->>'createdAt')::bigint, 0), NOW()
          FROM jsonb_array_elements($1::jsonb) AS item
          WHERE COALESCE(item->>'id', '') <> ''
@@ -226,6 +231,8 @@ async function persistRelationalRows(file, value) {
            session_token_hash = EXCLUDED.session_token_hash,
            role = EXCLUDED.role,
            is_admin = EXCLUDED.is_admin,
+           is_slot_member = EXCLUDED.is_slot_member,
+           premium_source = EXCLUDED.premium_source,
            data = EXCLUDED.data,
            created_at = EXCLUDED.created_at,
            updated_at = NOW()`,
@@ -403,12 +410,20 @@ async function initializePostgresSchema() {
     session_token_hash TEXT,
     role TEXT NOT NULL DEFAULT 'user',
     is_admin BOOLEAN NOT NULL DEFAULT FALSE,
+    is_slot_member BOOLEAN NOT NULL DEFAULT FALSE,
+    premium_source TEXT,
     data JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at BIGINT NOT NULL DEFAULT 0,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
   )`);
   await postgres.query(
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN NOT NULL DEFAULT FALSE",
+  );
+  await postgres.query(
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_slot_member BOOLEAN NOT NULL DEFAULT FALSE",
+  );
+  await postgres.query(
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS premium_source TEXT",
   );
   await postgres.query(`CREATE TABLE IF NOT EXISTS songs (
     id TEXT PRIMARY KEY,
@@ -449,7 +464,9 @@ const storageReady = DATABASE_PROVIDER === "postgres"
             file === USERS_FILE
               ? `SELECT data || jsonb_build_object(
                    'role', role,
-                   'isAdmin', is_admin
+                   'isAdmin', is_admin,
+                   'isSlotMember', is_slot_member,
+                   'premiumSource', premium_source
                  ) AS data
                  FROM users
                  ORDER BY created_at ASC`
@@ -561,6 +578,22 @@ async function migrateUserProfileFlags() {
     }
     if (user.adminLockedUntil === undefined) {
       user.adminLockedUntil = null;
+      changed = true;
+    }
+    const inferredPremiumSource = user.familyOwnerId
+      ? "family"
+      : user.premiumCodeId
+        ? "premium_code"
+        : user.paid
+          ? "stripe"
+          : user.premiumSource || null;
+    if ((user.premiumSource || null) !== inferredPremiumSource) {
+      user.premiumSource = inferredPremiumSource;
+      changed = true;
+    }
+    const inferredSlotMember = inferredPremiumSource === "family";
+    if (Boolean(user.isSlotMember) !== inferredSlotMember) {
+      user.isSlotMember = inferredSlotMember;
       changed = true;
     }
   });
@@ -765,12 +798,24 @@ function reserveCapacity(map, userId) {
     else map.delete(userId);
   };
 }
+function canPurchaseExtraSlots(user) {
+  if (isMasterAdmin(user)) return true;
+  const access = accessFor(user);
+  return Boolean(
+    access.paid &&
+      !user.isSlotMember &&
+      user.premiumSource === "stripe",
+  );
+}
 function publicUser(user) {
   return {
     id: user.id,
     email: user.email,
     role: user.role,
     isAdmin: Boolean(user.isAdmin || user.role === "admin"),
+    isSlotMember: Boolean(user.isSlotMember),
+    premiumSource: user.premiumSource || null,
+    canPurchaseExtraSlots: canPurchaseExtraSlots(user),
     banned: Boolean(user.banned),
     hasSeenUploadWarning: Boolean(user.hasSeenUploadWarning),
     adminFailedAttempts: Number(user.adminFailedAttempts || 0),
@@ -1156,6 +1201,11 @@ app.post(
         user.paid = true;
         user.paidAt = paidAt;
         user.premiumExpiresAt = paidAt + PREMIUM_PERIOD_MS;
+        user.premiumSource = "stripe";
+        user.isSlotMember = false;
+        user.baseSubscriptionOwner = true;
+        user.familyOwnerId = null;
+        user.familyInvitationTokenId = null;
         user.autoRenew = false;
         user.subscriptionCancelledAt = null;
         user.subscriptionAccessEndsAt = null;
@@ -1374,69 +1424,66 @@ app.post("/api/auth/subscribe", (_request, response) => {
     error: "This checkout route was removed. Use the verified Stripe checkout.",
   });
 });
+function personalPremiumCheckoutUrl(user) {
+  return buildStripePaymentLinkUrl(STRIPE_PAYMENT_LINK_URL, user);
+}
+
+function extraSlotsCheckoutUrl(user) {
+  return buildStripePaymentLinkUrl(STRIPE_DUO_LINK_URL, user);
+}
+
 async function createCheckoutSession(request, response) {
-  if (STRIPE_PAYMENT_LINK_URL) {
-    const paymentLinkUrl = buildStripePaymentLinkUrl(request.user);
-    if (!paymentLinkUrl) {
-      return response.status(503).json({
-        code: "STRIPE_PAYMENT_LINK_INVALID",
-        error: "The Stripe Payment Link is not configured correctly.",
-      });
-    }
-
-    return response.status(200).json({
-      paymentLink: true,
-      url: paymentLinkUrl,
-    });
-  }
-
-  if (!stripe || !STRIPE_SECRET_KEY.startsWith("sk_live_")) {
+  const paymentLinkUrl = personalPremiumCheckoutUrl(request.user);
+  if (!paymentLinkUrl)
     return response.status(503).json({
-      code: "STRIPE_NOT_CONFIGURED",
-      error: "Live Stripe checkout is not configured on this server.",
+      code: "STRIPE_PAYMENT_LINK_INVALID",
+      error: "The 36 DKK personal Premium link is not configured correctly.",
     });
-  }
-
-  const requestOrigin = `${request.protocol}://${request.get("host")}`;
-  const baseUrl = APP_BASE_URL || requestOrigin;
-  try {
-    const session = await stripe.checkout.sessions.create({
-      mode: "payment",
-      managed_payments: { enabled: false },
-      customer_email: request.user.email,
-      client_reference_id: request.user.id,
-      line_items: [
-        {
-          quantity: 1,
-          price_data: {
-            currency: "usd",
-            unit_amount: 999,
-            product_data: {
-              name: "D50 Premium - 30 Day Pass",
-              description: "Thirty days of D50 Premium access",
-            },
-          },
-        },
-      ],
-      metadata: {
-        purpose: "d50_premium_30_days",
-        userId: request.user.id,
-        email: request.user.email,
-      },
-      success_url: `${baseUrl}/?checkout=success&session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${baseUrl}/?checkout=cancelled`,
-    });
-    response.status(201).json({ id: session.id, url: session.url });
-  } catch (error) {
-    console.error("Stripe Checkout Session creation failed:", error.message);
-    response.status(502).json({
-      code: "STRIPE_UNAVAILABLE",
-      error: "Stripe checkout is temporarily unavailable. Please try again.",
-    });
-  }
+  response.json({
+    paymentLink: true,
+    product: "personal_premium",
+    url: paymentLinkUrl,
+  });
 }
 app.post("/create-checkout-session", auth, createCheckoutSession);
 app.post("/api/create-checkout-session", auth, createCheckoutSession);
+app.post("/api/checkout", auth, async (request, response) => {
+  const purchase = String(request.body.purchase || "personal");
+  const personalUrl = personalPremiumCheckoutUrl(request.user);
+  if (!personalUrl)
+    return response.status(503).json({
+      code: "STRIPE_PAYMENT_LINK_INVALID",
+      error: "The 36 DKK personal Premium link is not configured correctly.",
+    });
+
+  if (purchase !== "extra_slots")
+    return response.json({
+      product: "personal_premium",
+      url: personalUrl,
+    });
+
+  if (!canPurchaseExtraSlots(request.user))
+    return response.json({
+      product: "personal_premium",
+      redirectedToPersonal: true,
+      reason: request.user.isSlotMember
+        ? "SLOT_MEMBER_REQUIRES_OWN_PLAN"
+        : "PAID_OWNER_REQUIRED",
+      url: personalUrl,
+    });
+
+  const duoUrl = extraSlotsCheckoutUrl(request.user);
+  if (!duoUrl)
+    return response.status(503).json({
+      code: "STRIPE_DUO_LINK_INVALID",
+      error: "The 17 DKK extra-slots link is not configured correctly.",
+    });
+  return response.json({
+    product: "extra_slots",
+    redirectedToPersonal: false,
+    url: duoUrl,
+  });
+});
 app.post("/api/auth/logout", auth, async (request, response) => {
   const users = readUsers();
   const user = users.find((item) => item.id === request.user.id);
@@ -1657,6 +1704,8 @@ async function redeemFamilyToken(code, redeemingUserId) {
   );
   member.autoRenew = false;
   member.premiumSource = "family";
+  member.isSlotMember = true;
+  member.baseSubscriptionOwner = false;
   member.familyOwnerId = owner.id;
   member.familyInvitationTokenId = token.id;
   await writeUsers(users);
@@ -1682,6 +1731,8 @@ async function redeemPremiumCode(code, redeemingUserId) {
     member.premiumExpiresAt = now + durationDays * 86400000;
     member.autoRenew = false;
     member.premiumSource = "premium_code";
+    member.isSlotMember = false;
+    member.baseSubscriptionOwner = false;
     member.premiumCodeId = premiumCode.id;
     premiumCode.isUsed = true;
     premiumCode.claimedBy = member.email;
@@ -1726,6 +1777,8 @@ async function redeemPremiumCode(code, redeemingUserId) {
     member.premiumExpiresAt = now + durationDays * 86400000;
     member.autoRenew = false;
     member.premiumSource = "premium_code";
+    member.isSlotMember = false;
+    member.baseSubscriptionOwner = false;
     member.premiumCodeId = premiumCode.id;
     await client.query(
       `UPDATE premium_codes
@@ -1734,7 +1787,12 @@ async function redeemPremiumCode(code, redeemingUserId) {
       [premiumCode.id, member.email],
     );
     await client.query(
-      "UPDATE users SET data = $2::jsonb, updated_at = NOW() WHERE id = $1",
+      `UPDATE users
+       SET data = $2::jsonb,
+           is_slot_member = FALSE,
+           premium_source = 'premium_code',
+           updated_at = NOW()
+       WHERE id = $1`,
       [member.id, JSON.stringify(member)],
     );
     await client.query("COMMIT");
