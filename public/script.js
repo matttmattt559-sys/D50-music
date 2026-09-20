@@ -2161,37 +2161,7 @@ function showPremium(blocking = false) {
   $("#premiumModal").hidden = false;
 }
 
-const GROUP_TOKEN_STORAGE_KEY = "d50_group_invitation_tokens";
-const GROUP_FRIEND_REMOVED_KEY = "d50_group_friend_removed";
-
-function generateGroupToken() {
-  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  const randomValues = new Uint32Array(6);
-  crypto.getRandomValues(randomValues);
-  const code = Array.from(
-    randomValues,
-    (value) => alphabet[value % alphabet.length],
-  ).join("");
-  return `D50-${code.slice(0, 4)}-${code.slice(4)}`;
-}
-
-function readGroupTokens(requiredCount) {
-  let tokens = [];
-  try {
-    const saved = JSON.parse(localStorage.getItem(GROUP_TOKEN_STORAGE_KEY) || "[]");
-    if (Array.isArray(saved))
-      tokens = saved.filter((token) => /^D50-[A-Z0-9]{4}-[A-Z0-9]{2}$/.test(token));
-  } catch {
-    tokens = [];
-  }
-  while (tokens.length < requiredCount) {
-    const token = generateGroupToken();
-    if (!tokens.includes(token)) tokens.push(token);
-  }
-  tokens = tokens.slice(0, requiredCount);
-  localStorage.setItem(GROUP_TOKEN_STORAGE_KEY, JSON.stringify(tokens));
-  return tokens;
-}
+let groupSubscriptionState = null;
 
 async function copyGroupToken(token, button) {
   try {
@@ -2216,15 +2186,51 @@ async function copyGroupToken(token, button) {
   }, 1400);
 }
 
-function renderGroupSubscription() {
-  const friendRemoved = localStorage.getItem(GROUP_FRIEND_REMOVED_KEY) === "true";
-  $("#groupOwnerEmail").textContent = user?.email || "owner@example.com";
-  $("#groupFriendRow").hidden = friendRemoved;
-  $("#groupMemberCount").textContent = `${friendRemoved ? 1 : 2} of 4 slots`;
+function renderGroupSubscription(state) {
+  groupSubscriptionState = state;
+  $("#groupMemberCount").textContent = `${state.activeMemberCount} of ${state.totalSlots} slots`;
+  const memberList = $("#groupMemberList");
+  memberList.replaceChildren();
+  [state.owner, ...state.members].forEach((member, index) => {
+    const row = document.createElement("div");
+    row.className = "flex items-center justify-between gap-4 rounded-2xl border border-white/10 bg-white/[0.035] p-4";
+    const details = document.createElement("div");
+    details.className = "min-w-0";
+    const label = document.createElement("p");
+    label.className = "m-0 text-xs text-slate-500";
+    label.textContent = `Slot ${index + 1}`;
+    const email = document.createElement("p");
+    email.className = "mt-1 truncate font-medium text-slate-100";
+    email.textContent = member.email;
+    details.append(label, email);
+    row.append(details);
+    if (member.owner) {
+      const ownerBadge = document.createElement("span");
+      ownerBadge.className = "shrink-0 rounded-full bg-amber-400/10 px-3 py-1 text-xs font-semibold text-amber-200";
+      ownerBadge.textContent = "👑 Owner";
+      row.append(ownerBadge);
+    } else if (state.canManage) {
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "shrink-0 rounded-xl border border-rose-400/30 bg-rose-400/10 px-3 py-2 text-xs font-semibold text-rose-200 transition hover:bg-rose-400/20";
+      remove.textContent = "Remove";
+      remove.onclick = () => removeGroupMember(member.id, remove);
+      row.append(remove);
+    }
+    memberList.append(row);
+  });
 
-  const tokens = readGroupTokens(friendRemoved ? 3 : 2);
+  const tokens = state.unusedTokens || [];
   const list = $("#groupTokenList");
   list.replaceChildren();
+  if (!tokens.length) {
+    const empty = document.createElement("div");
+    empty.className = "rounded-2xl border border-dashed border-white/10 bg-white/[0.025] p-4 text-sm text-slate-400";
+    empty.textContent = state.canManage
+      ? "No paid invitation slots are available. Buy an extra slot to generate one code."
+      : "No invitation code is available on this account.";
+    list.append(empty);
+  }
   tokens.forEach((token, index) => {
     const row = document.createElement("div");
     row.className =
@@ -2234,10 +2240,10 @@ function renderGroupSubscription() {
     details.className = "min-w-0";
     const label = document.createElement("p");
     label.className = "m-0 text-xs text-slate-500";
-    label.textContent = `Empty slot ${index + (friendRemoved ? 2 : 3)}`;
+    label.textContent = `Paid empty slot ${state.activeMemberCount + index + 1}`;
     const code = document.createElement("code");
     code.className = "mt-1 block font-mono text-base font-bold tracking-[0.14em] text-cyan-100";
-    code.textContent = token;
+    code.textContent = token.code;
     details.append(label, code);
 
     const copyButton = document.createElement("button");
@@ -2245,7 +2251,7 @@ function renderGroupSubscription() {
     copyButton.className =
       "shrink-0 rounded-xl border border-cyan-300/25 bg-cyan-300/10 px-4 py-2.5 text-xs font-bold text-cyan-100 transition hover:bg-cyan-300/20";
     copyButton.textContent = "Copy Code";
-    copyButton.onclick = () => copyGroupToken(token, copyButton);
+    copyButton.onclick = () => copyGroupToken(token.code, copyButton);
     row.append(details, copyButton);
     list.append(row);
   });
@@ -2254,24 +2260,18 @@ function renderGroupSubscription() {
 async function openGroupSubscription() {
   if (!user) return showAccountGate();
   $("#groupTokenMessage").textContent = "";
-  renderGroupSubscription();
   $("#groupSubscriptionModal").hidden = false;
   $("#closeGroupSubscription").focus();
-  if (user.paid) {
-    const tokens = readGroupTokens(
-      localStorage.getItem(GROUP_FRIEND_REMOVED_KEY) === "true" ? 3 : 2,
-    );
-    const response = await apiFetch("/api/subscription/family-tokens", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ tokens }),
-    });
-    if (!response.ok) {
-      const result = await response.json().catch(() => ({}));
-      $("#groupTokenMessage").textContent =
-        result.error || "Family invitation tokens could not be synchronized.";
-    }
+  $("#groupMemberList").innerHTML = '<p class="text-sm text-slate-400">Loading paid slots…</p>';
+  $("#groupTokenList").replaceChildren();
+  const response = await apiFetch("/api/subscription/group");
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    $("#groupTokenMessage").textContent =
+      result.error || "Your subscription could not be loaded.";
+    return;
   }
+  renderGroupSubscription(result);
 }
 
 function closeGroupSubscription() {
@@ -2283,12 +2283,21 @@ $("#closeGroupSubscription").onclick = closeGroupSubscription;
 $("#groupSubscriptionModal").onclick = (event) => {
   if (event.target === $("#groupSubscriptionModal")) closeGroupSubscription();
 };
-$("#removeGroupFriend").onclick = () => {
-  localStorage.setItem(GROUP_FRIEND_REMOVED_KEY, "true");
-  renderGroupSubscription();
+async function removeGroupMember(memberId, button) {
+  button.disabled = true;
+  const response = await apiFetch(`/api/subscription/family-members/${encodeURIComponent(memberId)}`, {
+    method: "DELETE",
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    button.disabled = false;
+    $("#groupTokenMessage").textContent = result.error || "The member could not be removed.";
+    return;
+  }
+  renderGroupSubscription(result);
   $("#groupTokenMessage").textContent =
-    "The member was removed and their slot now has a new invitation token.";
-};
+    "The member was removed. Your paid slot is available again with the same code.";
+}
 $("#redeemGroupTokenForm").onsubmit = async (event) => {
   event.preventDefault();
   const input = $("#groupTokenInput");
@@ -2322,6 +2331,8 @@ $("#redeemGroupTokenForm").onsubmit = async (event) => {
     $("#groupTokenMessage").className =
       "mb-0 mt-3 min-h-5 text-sm text-emerald-300";
     updateProfile();
+    const groupResponse = await apiFetch("/api/subscription/group");
+    if (groupResponse.ok) renderGroupSubscription(await groupResponse.json());
   } catch {
     $("#groupTokenMessage").textContent =
       "The code could not be activated. Please try again.";
