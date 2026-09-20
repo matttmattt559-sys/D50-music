@@ -44,6 +44,7 @@ const CATEGORIES_FILE = path.join(DATA_DIR, "categories.json");
 const USERS_FILE = path.join(DATA_DIR, "users.json");
 const REPORTS_FILE = path.join(DATA_DIR, "reports.json");
 const CODES_FILE = path.join(DATA_DIR, "codes.json");
+const PREMIUM_CODES_FILE = path.join(DATA_DIR, "premium-codes.json");
 const allowedAudioExtensions = new Set([".mp3", ".wav", ".m4a"]);
 const allowedCoverExtensions = new Set([".jpg", ".jpeg", ".png"]);
 const AUDIO_LIMIT = 15 * 1024 * 1024;
@@ -308,7 +309,85 @@ const readReports = () => readJson(REPORTS_FILE);
 const writeReports = (value) => writeJson(REPORTS_FILE, value);
 const readCodes = () => readJson(CODES_FILE);
 const writeCodes = (value) => writeJson(CODES_FILE, value);
-const DATA_FILES = [SONGS_FILE, CATEGORIES_FILE, USERS_FILE, REPORTS_FILE, CODES_FILE];
+const readLocalPremiumCodes = () => readJson(PREMIUM_CODES_FILE);
+const writeLocalPremiumCodes = (value) => writeJson(PREMIUM_CODES_FILE, value);
+const DATA_FILES = [
+  SONGS_FILE,
+  CATEGORIES_FILE,
+  USERS_FILE,
+  REPORTS_FILE,
+  CODES_FILE,
+  PREMIUM_CODES_FILE,
+];
+
+function normalizeRedeemableCode(value) {
+  return sanitizeText(value, 64).toUpperCase();
+}
+
+function serializePremiumCode(row) {
+  return {
+    id: row.id,
+    code: row.code,
+    durationDays: Number(row.duration_days ?? row.durationDays),
+    isUsed: Boolean(row.is_used ?? row.isUsed),
+    claimedBy: row.claimed_by ?? row.claimedBy ?? null,
+  };
+}
+
+async function listPremiumCodes() {
+  if (DATABASE_PROVIDER === "postgres") {
+    const result = await postgres.query(
+      `SELECT id, code, duration_days, is_used, claimed_by
+       FROM premium_codes
+       ORDER BY code ASC`,
+    );
+    return result.rows.map(serializePremiumCode);
+  }
+  return readLocalPremiumCodes().map(serializePremiumCode);
+}
+
+async function createPremiumCodeRecord(code, durationDays) {
+  const entry = {
+    id: crypto.randomUUID(),
+    code,
+    durationDays,
+    isUsed: false,
+    claimedBy: null,
+  };
+  if (DATABASE_PROVIDER === "postgres") {
+    const result = await postgres.query(
+      `INSERT INTO premium_codes (id, code, duration_days)
+       VALUES ($1, $2, $3)
+       RETURNING id, code, duration_days, is_used, claimed_by`,
+      [entry.id, entry.code, entry.durationDays],
+    );
+    return serializePremiumCode(result.rows[0]);
+  }
+  const codes = readLocalPremiumCodes();
+  if (codes.some((item) => normalizeRedeemableCode(item.code) === code)) {
+    const error = new Error("That Premium code already exists.");
+    error.code = "23505";
+    throw error;
+  }
+  codes.push(entry);
+  await writeLocalPremiumCodes(codes);
+  return entry;
+}
+
+async function deletePremiumCodeRecord(id) {
+  if (DATABASE_PROVIDER === "postgres") {
+    const result = await postgres.query(
+      "DELETE FROM premium_codes WHERE id = $1 RETURNING id",
+      [id],
+    );
+    return result.rowCount > 0;
+  }
+  const codes = readLocalPremiumCodes();
+  const remaining = codes.filter((entry) => entry.id !== id);
+  if (remaining.length === codes.length) return false;
+  await writeLocalPremiumCodes(remaining);
+  return true;
+}
 
 async function initializePostgresSchema() {
   await postgres.query(`CREATE TABLE IF NOT EXISTS d50_documents (
@@ -340,6 +419,13 @@ async function initializePostgresSchema() {
     data JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at BIGINT NOT NULL DEFAULT 0,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`);
+  await postgres.query(`CREATE TABLE IF NOT EXISTS premium_codes (
+    id TEXT PRIMARY KEY,
+    code TEXT NOT NULL UNIQUE,
+    duration_days INTEGER NOT NULL CHECK (duration_days > 0),
+    is_used BOOLEAN NOT NULL DEFAULT FALSE,
+    claimed_by TEXT DEFAULT NULL
   )`);
   await postgres.query(
     "CREATE UNIQUE INDEX IF NOT EXISTS users_email_lower_idx ON users (LOWER(email))",
@@ -1519,6 +1605,219 @@ app.post("/api/auth/cancel-subscription", auth, async (request, response) => {
   await writeUsers(users);
   response.json(publicUser(user));
 });
+
+function familyTokensFor(user) {
+  return Array.isArray(user?.familyInvitationTokens)
+    ? user.familyInvitationTokens
+    : [];
+}
+
+async function redeemFamilyToken(code, redeemingUserId) {
+  const users = readUsers();
+  const owner = users.find((account) =>
+    familyTokensFor(account).some(
+      (entry) =>
+        entry.status === "active" &&
+        normalizeRedeemableCode(entry.code) === code,
+    ),
+  );
+  if (!owner) return null;
+  if (owner.id === redeemingUserId)
+    return { error: "You cannot redeem your own family invitation.", status: 409 };
+  if (!accessFor(owner).paid)
+    return { error: "That family invitation is no longer active.", status: 409 };
+
+  const member = users.find((account) => account.id === redeemingUserId);
+  if (!member) return { error: "Account not found.", status: 404 };
+  const token = familyTokensFor(owner).find(
+    (entry) =>
+      entry.status === "active" &&
+      normalizeRedeemableCode(entry.code) === code,
+  );
+  const now = Date.now();
+  token.status = "redeemed";
+  token.claimedByUserId = member.id;
+  token.claimedByEmail = member.email;
+  token.claimedAt = now;
+  owner.familyMembers = Array.isArray(owner.familyMembers)
+    ? owner.familyMembers.filter((entry) => entry.userId !== member.id)
+    : [];
+  owner.familyMembers.push({
+    userId: member.id,
+    email: member.email,
+    tokenId: token.id,
+    joinedAt: now,
+  });
+  const ownerExpiration = premiumExpiryFor(owner, now);
+  member.paid = true;
+  member.paidAt = now;
+  member.premiumExpiresAt = Math.max(
+    ownerExpiration,
+    Number(member.premiumExpiresAt || 0),
+  );
+  member.autoRenew = false;
+  member.premiumSource = "family";
+  member.familyOwnerId = owner.id;
+  member.familyInvitationTokenId = token.id;
+  await writeUsers(users);
+  return { type: "family", user: publicUser(member) };
+}
+
+async function redeemPremiumCode(code, redeemingUserId) {
+  const now = Date.now();
+  if (DATABASE_PROVIDER !== "postgres") {
+    const codes = readLocalPremiumCodes();
+    const premiumCode = codes.find(
+      (entry) => normalizeRedeemableCode(entry.code) === code,
+    );
+    if (!premiumCode) return null;
+    if (premiumCode.isUsed)
+      return { error: "That Premium code has already been redeemed.", status: 409 };
+    const users = readUsers();
+    const member = users.find((account) => account.id === redeemingUserId);
+    if (!member) return { error: "Account not found.", status: 404 };
+    const durationDays = Number(premiumCode.durationDays);
+    member.paid = true;
+    member.paidAt = now;
+    member.premiumExpiresAt = now + durationDays * 86400000;
+    member.autoRenew = false;
+    member.premiumSource = "premium_code";
+    member.premiumCodeId = premiumCode.id;
+    premiumCode.isUsed = true;
+    premiumCode.claimedBy = member.email;
+    await Promise.all([writeUsers(users), writeLocalPremiumCodes(codes)]);
+    return { type: "premium", durationDays, user: publicUser(member) };
+  }
+
+  const client = await postgres.connect();
+  try {
+    await client.query("BEGIN");
+    const codeResult = await client.query(
+      `SELECT id, code, duration_days, is_used, claimed_by
+       FROM premium_codes
+       WHERE code = $1
+       FOR UPDATE`,
+      [code],
+    );
+    if (!codeResult.rowCount) {
+      await client.query("ROLLBACK");
+      return null;
+    }
+    const premiumCode = codeResult.rows[0];
+    if (premiumCode.is_used) {
+      await client.query("ROLLBACK");
+      return { error: "That Premium code has already been redeemed.", status: 409 };
+    }
+    const userResult = await client.query(
+      `SELECT data || jsonb_build_object('role', role, 'isAdmin', is_admin) AS data
+       FROM users
+       WHERE id = $1
+       FOR UPDATE`,
+      [redeemingUserId],
+    );
+    if (!userResult.rowCount) {
+      await client.query("ROLLBACK");
+      return { error: "Account not found.", status: 404 };
+    }
+    const member = userResult.rows[0].data;
+    const durationDays = Number(premiumCode.duration_days);
+    member.paid = true;
+    member.paidAt = now;
+    member.premiumExpiresAt = now + durationDays * 86400000;
+    member.autoRenew = false;
+    member.premiumSource = "premium_code";
+    member.premiumCodeId = premiumCode.id;
+    await client.query(
+      `UPDATE premium_codes
+       SET is_used = TRUE, claimed_by = $2
+       WHERE id = $1`,
+      [premiumCode.id, member.email],
+    );
+    await client.query(
+      "UPDATE users SET data = $2::jsonb, updated_at = NOW() WHERE id = $1",
+      [member.id, JSON.stringify(member)],
+    );
+    await client.query("COMMIT");
+    const cachedUsers = readUsers();
+    const cacheIndex = cachedUsers.findIndex((account) => account.id === member.id);
+    if (cacheIndex >= 0) cachedUsers[cacheIndex] = member;
+    databaseState.set(USERS_FILE, structuredClone(cachedUsers));
+    return { type: "premium", durationDays, user: publicUser(member) };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+app.post("/api/subscription/family-tokens", auth, async (request, response) => {
+  const users = readUsers();
+  const owner = users.find((account) => account.id === request.user.id);
+  if (!owner || !accessFor(owner).paid)
+    return response.status(403).json({
+      error: "An active Premium plan is required to create family invitations.",
+    });
+  const requestedTokens = Array.isArray(request.body.tokens)
+    ? request.body.tokens
+        .map(normalizeRedeemableCode)
+        .filter((code) => /^D50-[A-Z0-9]{4}-[A-Z0-9]{2}$/.test(code))
+        .slice(0, 3)
+    : [];
+  const premiumCodeValues = new Set(
+    (await listPremiumCodes()).map((entry) => normalizeRedeemableCode(entry.code)),
+  );
+  if (requestedTokens.some((code) => premiumCodeValues.has(code)))
+    return response.status(409).json({
+      error: "One of those family tokens is already reserved as a Premium code.",
+    });
+  const existing = familyTokensFor(owner);
+  const byCode = new Map(
+    existing.map((entry) => [normalizeRedeemableCode(entry.code), entry]),
+  );
+  requestedTokens.forEach((code) => {
+    if (!byCode.has(code)) {
+      byCode.set(code, {
+        id: crypto.randomUUID(),
+        code,
+        status: "active",
+        createdAt: Date.now(),
+      });
+    }
+  });
+  owner.familyInvitationTokens = [...byCode.values()].slice(0, 3);
+  await writeUsers(users);
+  response.json({
+    tokens: owner.familyInvitationTokens,
+    members: Array.isArray(owner.familyMembers) ? owner.familyMembers : [],
+  });
+});
+
+app.post("/api/subscription/redeem-code", auth, async (request, response) => {
+  const code = normalizeRedeemableCode(request.body.code);
+  if (code.length < 4)
+    return response.status(400).json({ error: "Enter a valid invitation or Premium code." });
+  try {
+    const familyResult = await redeemFamilyToken(code, request.user.id);
+    if (familyResult)
+      return familyResult.error
+        ? response.status(familyResult.status).json({ error: familyResult.error })
+        : response.json(familyResult);
+    const premiumResult = await redeemPremiumCode(code, request.user.id);
+    if (premiumResult)
+      return premiumResult.error
+        ? response.status(premiumResult.status).json({ error: premiumResult.error })
+        : response.json(premiumResult);
+    return response.status(404).json({
+      error: "That invitation or Premium code was not found.",
+    });
+  } catch (error) {
+    console.error("Code redemption failed:", error.message);
+    return response.status(500).json({
+      error: "The code could not be activated. Please try again.",
+    });
+  }
+});
 app.post("/api/admin/unlock", auth, async (request, response) => {
   const now = Date.now();
   const users = readUsers();
@@ -1654,6 +1953,20 @@ const MASTER_ADMIN_UI_FRAGMENT = `
       <p id="adminCodeMessage" class="form-message"></p>
       <div id="adminCodesPanel" class="admin-codes-panel"></div>
     </section>
+    <section class="admin-code-generator premium-code-generator">
+      <p class="eye">PREMIUM MEMBERSHIP MANAGEMENT</p>
+      <h2>PREMIUM CODES GENERATOR</h2>
+      <form id="premiumCodeForm" class="admin-code-form premium-code-form">
+        <label>Custom premium code<input id="premiumCodeInput" maxlength="64" autocomplete="off" required /></label>
+        <label>Duration (Days)<input id="premiumCodeDuration" type="number" min="1" max="3650" step="1" value="30" required /></label>
+        <button class="primary-button premium-code-create" type="submit">Create Premium Code</button>
+      </form>
+      <p id="premiumCodeMessage" class="form-message"></p>
+      <div class="premium-code-table-heading" aria-hidden="true">
+        <span>Generated Premium Code</span><span>Duration Days</span><span>Status</span><span>Action</span>
+      </div>
+      <div id="premiumCodesPanel" class="admin-codes-panel premium-codes-panel"></div>
+    </section>
     <p id="adminHubMessage" class="form-message"></p>
   </div>
 </div>
@@ -1741,6 +2054,66 @@ app.delete("/api/admin/access-codes/:id", auth, masterOnly, async (request, resp
     writeUsers(users),
   ]);
   response.status(204).end();
+});
+
+app.get("/api/admin/premium-codes", auth, masterOnly, async (_request, response) => {
+  try {
+    response.json(await listPremiumCodes());
+  } catch (error) {
+    console.error("Premium codes could not be loaded:", error.message);
+    response.status(500).json({ error: "Premium codes could not be loaded." });
+  }
+});
+
+app.post("/api/admin/create-premium-code", auth, masterOnly, async (request, response) => {
+  const code = normalizeRedeemableCode(request.body.code);
+  const durationDays = Number(request.body.durationDays);
+  if (code.length < 4)
+    return response.status(400).json({
+      error: "Premium codes must contain at least 4 characters.",
+    });
+  if (!Number.isSafeInteger(durationDays) || durationDays < 1 || durationDays > 3650)
+    return response.status(400).json({
+      error: "Duration must be a whole number from 1 to 3650 days.",
+    });
+  if (code === normalizeRedeemableCode(ADMIN_MASTER_PIN))
+    return response.status(409).json({
+      error: "That code is reserved for Master Admin access.",
+    });
+  if (readCodes().some((entry) => normalizeRedeemableCode(entry.code) === code))
+    return response.status(409).json({
+      error: "That code is already used by the Admin Access generator.",
+    });
+  if (
+    readUsers().some((account) =>
+      familyTokensFor(account).some(
+        (entry) => normalizeRedeemableCode(entry.code) === code,
+      ),
+    )
+  )
+    return response.status(409).json({
+      error: "That code is already used by a family invitation.",
+    });
+  try {
+    const entry = await createPremiumCodeRecord(code, durationDays);
+    response.status(201).json(entry);
+  } catch (error) {
+    if (error.code === "23505")
+      return response.status(409).json({ error: "That Premium code already exists." });
+    console.error("Premium code creation failed:", error.message);
+    response.status(500).json({ error: "The Premium code could not be created." });
+  }
+});
+
+app.delete("/api/admin/premium-codes/:id", auth, masterOnly, async (request, response) => {
+  try {
+    if (!(await deletePremiumCodeRecord(request.params.id)))
+      return response.status(404).json({ error: "Premium code not found." });
+    response.status(204).end();
+  } catch (error) {
+    console.error("Premium code revocation failed:", error.message);
+    response.status(500).json({ error: "The Premium code could not be revoked." });
+  }
 });
 app.post("/api/reports", auth, reporterOnly, async (request, response) => {
   const itemType = sanitizeText(request.body.itemType, 30);
