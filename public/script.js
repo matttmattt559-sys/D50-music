@@ -92,6 +92,34 @@ function setQueueCompact(compact) {
 }
 setQueueCompact(queueCompact);
 $("#queueLayoutToggle").onclick = () => setQueueCompact(!queueCompact);
+const mobileQueueToggle = $("#mobileQueueToggle");
+const queueDrawerClose = $("#queueDrawerClose");
+const queueDrawerBackdrop = $("#queueDrawerBackdrop");
+
+function setMobileQueueOpen(open, restoreFocus = false) {
+  const isOpen = Boolean(open);
+  document.body.classList.toggle("mobile-queue-open", isOpen);
+  $("#nextUpPanel").classList.toggle("mobile-open", isOpen);
+  mobileQueueToggle.setAttribute("aria-expanded", String(isOpen));
+  mobileQueueToggle.setAttribute(
+    "aria-label",
+    isOpen ? "Close Next Up queue" : "Open Next Up queue",
+  );
+  if (isOpen) queueDrawerClose.focus();
+  else if (restoreFocus) mobileQueueToggle.focus();
+}
+
+mobileQueueToggle.onclick = () =>
+  setMobileQueueOpen(!$("#nextUpPanel").classList.contains("mobile-open"));
+queueDrawerClose.onclick = () => setMobileQueueOpen(false, true);
+queueDrawerBackdrop.onclick = () => setMobileQueueOpen(false, true);
+window.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && $("#nextUpPanel").classList.contains("mobile-open"))
+    setMobileQueueOpen(false, true);
+});
+window.addEventListener("resize", () => {
+  if (window.innerWidth >= 768) setMobileQueueOpen(false);
+});
 const audio = $("#audio"),
   fmt = (n) =>
     Number.isFinite(n)
@@ -291,7 +319,66 @@ async function like(s) {
   render();
   heart();
 }
-async function play(s, scope = songs, scopeName = "all", preservedUpcoming = null) {
+function mediaArtworkUrl(song) {
+  if (!song?.coverUrl) return "";
+  try {
+    return new URL(song.coverUrl, window.location.origin).href;
+  } catch {
+    return "";
+  }
+}
+
+function updateMediaSessionMetadata(song) {
+  if (!("mediaSession" in navigator) || typeof MediaMetadata === "undefined" || !song)
+    return;
+  const category = categories.find((entry) =>
+    (song.categoryIds || []).includes(entry.id),
+  );
+  const artworkUrl = mediaArtworkUrl(song);
+  navigator.mediaSession.metadata = new MediaMetadata({
+    title: song.title || "Untitled track",
+    artist: song.uploaderName || song.artist || "D50 Artist",
+    album: category?.name || song.album || "D50 Music",
+    artwork: artworkUrl ? [{ src: artworkUrl }] : [],
+  });
+}
+
+function updateMediaSessionPlaybackState() {
+  if (!("mediaSession" in navigator)) return;
+  navigator.mediaSession.playbackState = audio.paused ? "paused" : "playing";
+}
+
+function startSongAudio(s, scope, scopeName, preservedUpcoming) {
+  queue = scope.map((song) => song.id);
+  queueScope = scopeName;
+  currentId = s.id;
+  audio.src = s.url;
+  updateMediaSessionMetadata(s);
+  $("#now").textContent = s.title;
+  fillNextUp(Array.isArray(preservedUpcoming) ? preservedUpcoming : []);
+  heart();
+  updateActiveSong();
+
+  // Keep src assignment and play() in the same synchronous execution block.
+  // This is important for iOS/WebKit when advancing while the screen is locked.
+  const playback = audio.play();
+  if (playback?.catch)
+    playback.catch((error) =>
+      console.warn("Background playback could not start:", error.message),
+    );
+}
+
+async function play(
+  s,
+  scope = songs,
+  scopeName = "all",
+  preservedUpcoming = null,
+  options = {},
+) {
+  const immediateBackgroundTransition = Boolean(options.immediateBackgroundTransition);
+  if (immediateBackgroundTransition)
+    startSongAudio(s, scope, scopeName, preservedUpcoming);
+
   if (!user) {
     if (guestListenCount >= 5) return showAccountGate();
     guestListenCount += 1;
@@ -302,20 +389,16 @@ async function play(s, scope = songs, scopeName = "all", preservedUpcoming = nul
     const permission = await apiFetch("/api/listens/" + s.id, {
       method: "POST",
     });
-    if (!permission.ok) return handleLocked(permission);
+    if (!permission.ok) {
+      if (immediateBackgroundTransition) audio.pause();
+      return handleLocked(permission);
+    }
     user = await permission.json();
     guestPreviewActive = false;
     updateProfile();
   }
-  queue = scope.map((song) => song.id);
-  queueScope = scopeName;
-  currentId = s.id;
-  audio.src = s.url;
-  $("#now").textContent = s.title;
-  fillNextUp(Array.isArray(preservedUpcoming) ? preservedUpcoming : []);
-  heart();
-  updateActiveSong();
-  audio.play();
+  if (!immediateBackgroundTransition)
+    startSongAudio(s, scope, scopeName, preservedUpcoming);
 }
 function toggleSong(s, scope = songs, scopeName = "all") {
   if (currentId === s.id && audio.src) {
@@ -2063,8 +2146,15 @@ $("#play").onclick = () => {
   }
   audio.play();
 };
-audio.addEventListener("play", updatePlayButton);
-audio.addEventListener("pause", updatePlayButton);
+audio.addEventListener("play", () => {
+  updatePlayButton();
+  updateMediaSessionMetadata(active());
+  updateMediaSessionPlaybackState();
+});
+audio.addEventListener("pause", () => {
+  updatePlayButton();
+  updateMediaSessionPlaybackState();
+});
 audio.addEventListener("ended", updatePlayButton);
 audio.addEventListener("ended", () => {
   if (!user) {
@@ -2076,7 +2166,7 @@ audio.addEventListener("ended", () => {
     showPremium(true);
     return;
   }
-  step(1);
+  step(1, { immediateBackgroundTransition: true });
 });
 $("#playerLike").onclick = () => active() && like(active());
 $("#shuffle").onclick = () => {
@@ -2085,7 +2175,7 @@ $("#shuffle").onclick = () => {
   $("#shuffle").setAttribute("aria-pressed", String(shuffleOn));
   if (currentId) fillNextUp([]);
 };
-function step(n) {
+function step(n, options = {}) {
   const activeScope = queueScope;
   const available = queueSongs();
   if (!available.length) return;
@@ -2095,23 +2185,48 @@ function step(n) {
       const nextScope = available.some((song) => song.id === scheduled.id)
         ? available
         : [...available, scheduled];
-      return play(scheduled, nextScope, activeScope, nextUpIds.slice(1));
+      return play(scheduled, nextScope, activeScope, nextUpIds.slice(1), options);
     }
   }
   if (shuffleOn) {
     const choices = available.filter((song) => song.id !== currentId);
     if (!choices.length) return;
     const randomNext = choices[Math.floor(Math.random() * choices.length)];
-    return play(randomNext, available, activeScope);
+    return play(randomNext, available, activeScope, null, options);
   }
   let index = available.findIndex((song) => song.id === currentId);
   if (index < 0) index = n > 0 ? -1 : 0;
   const nextIndex = (index + n + available.length) % available.length;
-  return play(available[nextIndex], available, activeScope);
+  return play(available[nextIndex], available, activeScope, null, options);
 }
 $("#prev").onclick = () => step(-1);
 $("#next").onclick = () => step(1);
 $("#start").onclick = () => songs[0] && play(songs[0]);
+
+function configureMediaSession() {
+  if (!("mediaSession" in navigator)) return;
+  const actions = {
+    play: () => {
+      const song = active();
+      if (!song) return;
+      updateMediaSessionMetadata(song);
+      const playback = audio.play();
+      if (playback?.catch) playback.catch(() => {});
+    },
+    pause: () => audio.pause(),
+    nexttrack: () => step(1, { immediateBackgroundTransition: true }),
+    previoustrack: () => step(-1, { immediateBackgroundTransition: true }),
+  };
+  Object.entries(actions).forEach(([action, handler]) => {
+    try {
+      navigator.mediaSession.setActionHandler(action, handler);
+    } catch (error) {
+      console.debug(`Media Session action ${action} is unavailable.`, error);
+    }
+  });
+}
+configureMediaSession();
+
 let progressAnimationFrame = 0;
 function syncProgress() {
   if (!user && guestPreviewActive && audio.currentTime >= 10) {

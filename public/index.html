@@ -2,9 +2,9 @@
 <html>
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>D50</title>
-    <link rel="stylesheet" href="style.css?v=20260919-1" />
+    <link rel="stylesheet" href="style.css?v=20260920-mobile-2" />
     <link rel="stylesheet" href="group-subscription.css?v=20260920-1" />
   </head>
   <body class="dashboard-active">
@@ -73,7 +73,7 @@
         ><button data-v="library" title="Your library">
           <span class="nav-icon">▥</span
           ><span class="nav-label">Your library</span></button
-        ><button id="uploadNavButton" data-v="upload" title="Upload music">
+        ><button id="uploadNavButton" class="hidden md:flex" data-v="upload" title="Upload music">
           <span class="nav-icon">⇧</span
           ><span class="nav-label">Upload music</span>
         </button>
@@ -145,7 +145,7 @@
         <div class="header-account">
           <button
             id="reportContentButton"
-            class="report-content-button"
+            class="report-content-button hidden md:flex"
             type="button"
             hidden
           >
@@ -332,6 +332,7 @@
         </section>
       </section>
     </main>
+    <button id="queueDrawerBackdrop" class="queue-drawer-backdrop" type="button" aria-label="Close queue" tabindex="-1"></button>
     <section id="nextUpPanel" class="next-up-panel" aria-labelledby="nextUpTitle">
       <div class="next-up-heading">
         <div class="next-up-heading-copy">
@@ -339,6 +340,7 @@
           <h2 id="nextUpTitle">Next Up</h2>
           <span>4 upcoming tracks</span>
         </div>
+        <button id="queueDrawerClose" class="queue-drawer-close" type="button" aria-label="Close queue">×</button>
         <button
           id="queueLayoutToggle"
           class="queue-layout-toggle"
@@ -373,6 +375,7 @@
           <button id="prev" class="skip" aria-label="Previous song">⏮</button>
           <button id="play" aria-label="Play">▶</button>
           <button id="next" class="skip" aria-label="Next song">⏭</button>
+          <button id="mobileQueueToggle" class="mobile-queue-toggle" type="button" aria-label="Open Next Up queue" aria-expanded="false" aria-controls="nextUpPanel">☷</button>
         </div>
         <div class="timeline">
           <div class="progress-bar-wrapper">
@@ -588,6 +591,6 @@
         <p id="createCategoryMessage" class="form-message"></p>
       </div>
     </div>
-    <script src="script.js?v=20260920-3"></script>
+    <script src="script.js?v=20260920-mobile-player-1"></script>
   </body>
 </html>
