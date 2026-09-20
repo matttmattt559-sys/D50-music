@@ -757,11 +757,14 @@ function purgeAdminUi() {
 }
 function bindAdminUi() {
   const codeForm = $("#adminCodeForm");
+  const premiumCodeForm = $("#premiumCodeForm");
   const manualBan = $("#manualBanButton");
   const banForm = $("#banAccountForm");
   const previewAudio = $("#pendingPreviewAudio");
-  if (!codeForm || !manualBan || !banForm || !previewAudio) return false;
+  if (!codeForm || !premiumCodeForm || !manualBan || !banForm || !previewAudio)
+    return false;
   codeForm.onsubmit = handleAdminCodeSubmit;
+  premiumCodeForm.onsubmit = handlePremiumCodeSubmit;
   manualBan.onclick = () => openBanAccountModal();
   banForm.onsubmit = handleBanAccountSubmit;
   previewAudio.addEventListener("ended", handlePendingPreviewEnded);
@@ -2177,7 +2180,7 @@ function readGroupTokens(requiredCount) {
   try {
     const saved = JSON.parse(localStorage.getItem(GROUP_TOKEN_STORAGE_KEY) || "[]");
     if (Array.isArray(saved))
-      tokens = saved.filter((token) => /^D50-[A-Z2-9]{4}-[A-Z2-9]{2}$/.test(token));
+      tokens = saved.filter((token) => /^D50-[A-Z0-9]{4}-[A-Z0-9]{2}$/.test(token));
   } catch {
     tokens = [];
   }
@@ -2248,12 +2251,27 @@ function renderGroupSubscription() {
   });
 }
 
-function openGroupSubscription() {
+async function openGroupSubscription() {
   if (!user) return showAccountGate();
   $("#groupTokenMessage").textContent = "";
   renderGroupSubscription();
   $("#groupSubscriptionModal").hidden = false;
   $("#closeGroupSubscription").focus();
+  if (user.paid) {
+    const tokens = readGroupTokens(
+      localStorage.getItem(GROUP_FRIEND_REMOVED_KEY) === "true" ? 3 : 2,
+    );
+    const response = await apiFetch("/api/subscription/family-tokens", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tokens }),
+    });
+    if (!response.ok) {
+      const result = await response.json().catch(() => ({}));
+      $("#groupTokenMessage").textContent =
+        result.error || "Family invitation tokens could not be synchronized.";
+    }
+  }
 }
 
 function closeGroupSubscription() {
@@ -2271,29 +2289,47 @@ $("#removeGroupFriend").onclick = () => {
   $("#groupTokenMessage").textContent =
     "The member was removed and their slot now has a new invitation token.";
 };
-$("#redeemGroupTokenForm").onsubmit = (event) => {
+$("#redeemGroupTokenForm").onsubmit = async (event) => {
   event.preventDefault();
   const input = $("#groupTokenInput");
-  const enteredToken = input.value.trim().toUpperCase();
-  const tokens = readGroupTokens(
-    localStorage.getItem(GROUP_FRIEND_REMOVED_KEY) === "true" ? 3 : 2,
-  );
-  const tokenIndex = tokens.indexOf(enteredToken);
-  if (tokenIndex === -1) {
+  const submit = event.currentTarget.querySelector('button[type="submit"]');
+  const enteredCode = input.value.trim();
+  if (!enteredCode) return;
+  submit.disabled = true;
+  $("#groupTokenMessage").className =
+    "mb-0 mt-3 min-h-5 text-sm text-slate-400";
+  $("#groupTokenMessage").textContent = "Checking code…";
+  try {
+    const response = await apiFetch("/api/subscription/redeem-code", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: enteredCode }),
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      $("#groupTokenMessage").textContent =
+        result.error || "That code could not be activated.";
+      $("#groupTokenMessage").className =
+        "mb-0 mt-3 min-h-5 text-sm text-rose-300";
+      return;
+    }
+    user = result.user;
+    input.value = "";
     $("#groupTokenMessage").textContent =
-      "That invitation token is invalid or has already been used.";
+      result.type === "premium"
+        ? `Premium activated for ${result.durationDays} days.`
+        : "Family invitation accepted. Premium access is active.";
+    $("#groupTokenMessage").className =
+      "mb-0 mt-3 min-h-5 text-sm text-emerald-300";
+    updateProfile();
+  } catch {
+    $("#groupTokenMessage").textContent =
+      "The code could not be activated. Please try again.";
     $("#groupTokenMessage").className =
       "mb-0 mt-3 min-h-5 text-sm text-rose-300";
-    return;
+  } finally {
+    submit.disabled = false;
   }
-  tokens.splice(tokenIndex, 1);
-  localStorage.setItem(GROUP_TOKEN_STORAGE_KEY, JSON.stringify(tokens));
-  input.value = "";
-  $("#groupTokenMessage").textContent =
-    "Invitation accepted. Group access is active on this browser.";
-  $("#groupTokenMessage").className =
-    "mb-0 mt-3 min-h-5 text-sm text-emerald-300";
-  renderGroupSubscription();
 };
 function maybeShowUploadWarning() {
   if (!user || user.adminMode || user.hasSeenUploadWarning) return;
@@ -2677,6 +2713,79 @@ async function handleAdminCodeSubmit(event) {
     submit.disabled = false;
   }
 }
+
+function renderPremiumCodes(codes) {
+  const panel = $("#premiumCodesPanel");
+  panel.replaceChildren();
+  if (!codes.length) {
+    panel.innerHTML =
+      '<p class="admin-hub-empty">No Premium codes created yet.</p>';
+    return;
+  }
+  codes.forEach((entry) => {
+    const row = document.createElement("article");
+    row.className = "admin-code-row premium-code-row";
+    const code = document.createElement("b");
+    code.className = "admin-code-value";
+    code.textContent = entry.code;
+    const duration = document.createElement("span");
+    duration.className = "premium-code-duration";
+    duration.textContent = `${Number(entry.durationDays)} days`;
+    const status = document.createElement("span");
+    status.className = `admin-code-status ${entry.isUsed ? "redeemed" : "active"}`;
+    status.textContent = entry.isUsed
+      ? `Redeemed by ${entry.claimedBy || "unknown user"}`
+      : "Unused";
+    const revoke = document.createElement("button");
+    revoke.type = "button";
+    revoke.className = "revoke-admin-code";
+    revoke.textContent = "Revoke Code";
+    revoke.onclick = async () => {
+      if (!confirm(`Revoke Premium code “${entry.code}”?`)) return;
+      revoke.disabled = true;
+      const response = await apiFetch(`/api/admin/premium-codes/${entry.id}`, {
+        method: "DELETE",
+      });
+      if (!response.ok) {
+        revoke.disabled = false;
+        return handleLocked(response);
+      }
+      await loadAdminHub();
+    };
+    row.append(code, duration, status, revoke);
+    panel.append(row);
+  });
+}
+
+async function handlePremiumCodeSubmit(event) {
+  event.preventDefault();
+  if (user?.adminMode !== "master") return;
+  const submit = event.currentTarget.querySelector('button[type="submit"]');
+  submit.disabled = true;
+  $("#premiumCodeMessage").textContent = "Creating Premium code…";
+  try {
+    const response = await apiFetch("/api/admin/create-premium-code", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        code: $("#premiumCodeInput").value,
+        durationDays: Number($("#premiumCodeDuration").value),
+      }),
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      $("#premiumCodeMessage").textContent =
+        result.error || "The Premium code could not be created.";
+      return;
+    }
+    event.currentTarget.reset();
+    $("#premiumCodeDuration").value = "30";
+    $("#premiumCodeMessage").textContent = "Premium code created.";
+    await loadAdminHub();
+  } finally {
+    submit.disabled = false;
+  }
+}
 async function handleBanAccountSubmit(event) {
   event.preventDefault();
   if (user?.adminMode !== "master") return;
@@ -2721,18 +2830,25 @@ async function handleBanAccountSubmit(event) {
 async function loadAdminHub() {
   if (user?.adminMode !== "master") return;
   $("#adminHubMessage").textContent = "Loading…";
-  const [reportsResponse, bansResponse, codesResponse] = await Promise.all([
+  const [reportsResponse, bansResponse, codesResponse, premiumCodesResponse] = await Promise.all([
     apiFetch("/api/reports", { cache: "no-store" }),
     apiFetch("/api/admin/reports-bans", { cache: "no-store" }),
     apiFetch("/api/admin/access-codes", { cache: "no-store" }),
+    apiFetch("/api/admin/premium-codes", { cache: "no-store" }),
   ]);
-  const [reports, bansData, codes] = await Promise.all([
+  const [reports, bansData, codes, premiumCodes] = await Promise.all([
     reportsResponse.json().catch(() => []),
     bansResponse.json().catch(() => ({})),
     codesResponse.json().catch(() => []),
+    premiumCodesResponse.json().catch(() => []),
   ]);
   if (user?.adminMode !== "master" || !$("#adminHubModal")) return;
-  if (!reportsResponse.ok || !bansResponse.ok || !codesResponse.ok) {
+  if (
+    !reportsResponse.ok ||
+    !bansResponse.ok ||
+    !codesResponse.ok ||
+    !premiumCodesResponse.ok
+  ) {
     $("#adminHubMessage").textContent =
       bansData.error || "Admin data could not be loaded.";
     return;
@@ -2741,6 +2857,7 @@ async function loadAdminHub() {
   renderBannedUsers(bansData.bannedUsers || []);
   renderAdminBlockedUsers(bansData.adminBlockedUsers || []);
   renderAdminAccessCodes(Array.isArray(codes) ? codes : []);
+  renderPremiumCodes(Array.isArray(premiumCodes) ? premiumCodes : []);
   if (managerAccountFilter?.id) {
     const selectedBan = (bansData.bannedUsers || []).find(
       (account) => account.id === managerAccountFilter.id,

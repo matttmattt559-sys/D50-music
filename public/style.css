@@ -1795,6 +1795,36 @@ body.report-mode-active .report-mode-badge button {
 .admin-code-form label {
   margin: 0;
 }
+.premium-code-generator {
+  border-color: #9b7cff55;
+  background: linear-gradient(135deg, #21153b, #101626);
+}
+.premium-code-form {
+  grid-template-columns: minmax(210px, 1fr) minmax(150px, 0.45fr) auto;
+}
+.premium-code-create {
+  background: linear-gradient(110deg, #754cff, #a16cff) !important;
+}
+.premium-code-table-heading,
+.premium-code-row {
+  display: grid;
+  grid-template-columns: minmax(160px, 0.8fr) minmax(110px, 0.35fr) minmax(210px, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+}
+.premium-code-table-heading {
+  padding: 10px 12px 2px;
+  color: #8f87a3;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.premium-code-duration {
+  color: #c8b8ff;
+  font-size: 13px;
+  font-weight: 800;
+}
 .admin-codes-panel {
   display: grid;
   gap: 8px;
@@ -2213,8 +2243,14 @@ body.report-mode-active .report-mode-badge button {
     grid-template-columns: 54px minmax(0, 1fr);
   }
   .admin-code-form,
-  .admin-code-row {
+  .admin-code-row,
+  .premium-code-form,
+  .premium-code-table-heading,
+  .premium-code-row {
     grid-template-columns: 1fr;
+  }
+  .premium-code-table-heading {
+    display: none;
   }
   .free-upload-artwork {
     width: 54px;
