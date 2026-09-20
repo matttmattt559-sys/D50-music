@@ -3551,14 +3551,16 @@ $$(".modal-close").forEach(
     (button.onclick =
       button.id === "reportConfirmationClose" ? finishReportMode : hideModals),
 );
-async function openStripeCheckout(button) {
+async function requestStripeCheckout(button, purchase) {
   if (!user) return showAccountGate();
   const originalText = button.textContent;
   button.disabled = true;
   button.textContent = "Opening Stripe…";
   try {
-    const response = await apiFetch("/api/create-checkout-session", {
+    const response = await apiFetch("/api/checkout", {
       method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ purchase }),
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok || !data.url) {
@@ -3574,8 +3576,11 @@ async function openStripeCheckout(button) {
     button.textContent = originalText;
   }
 }
-$("#upgradeNow").onclick = () => openStripeCheckout($("#upgradeNow"));
-$("#groupBuySlots").onclick = () => openStripeCheckout($("#groupBuySlots"));
+$("#upgradeNow").onclick = () =>
+  requestStripeCheckout($("#upgradeNow"), "personal");
+
+$("#groupBuySlots").onclick = () =>
+  requestStripeCheckout($("#groupBuySlots"), "extra_slots");
 setInterval(() => {
   if (user?.adminMode === "master" && !document.hidden)
     syncPendingUploads();
