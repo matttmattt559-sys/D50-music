@@ -77,6 +77,9 @@ const STRIPE_PAYMENT_LINK_ID = String(
 const STRIPE_DUO_LINK_URL = String(
   process.env.STRIPE_DUO_LINK_URL || "",
 ).trim();
+const STRIPE_DUO_LINK_ID = String(
+  process.env.STRIPE_DUO_LINK_ID || "",
+).trim();
 const APP_BASE_URL = String(process.env.APP_BASE_URL || "")
   .trim()
   .replace(/\/$/, "");
@@ -1157,10 +1160,13 @@ app.post(
           ? session.payment_link
           : session.payment_link?.id || "";
 
-      if (
-        STRIPE_PAYMENT_LINK_ID &&
-        sessionPaymentLinkId !== STRIPE_PAYMENT_LINK_ID
-      ) {
+      const isPersonalPayment = Boolean(
+        STRIPE_PAYMENT_LINK_ID && sessionPaymentLinkId === STRIPE_PAYMENT_LINK_ID,
+      );
+      const isExtraSlotPayment = Boolean(
+        STRIPE_DUO_LINK_ID && sessionPaymentLinkId === STRIPE_DUO_LINK_ID,
+      );
+      if (!isPersonalPayment && !isExtraSlotPayment) {
         return response.status(200).json({ received: true });
       }
 
@@ -1190,6 +1196,38 @@ app.post(
         console.error(
           `Stripe payment received for unknown user: ${referencedUserId || customerEmail || "missing reference"}`,
         );
+        return response.status(200).json({ received: true });
+      }
+
+      if (isExtraSlotPayment) {
+        if (!canPurchaseExtraSlots(user)) {
+          console.error(`Rejected extra-slot payment for ineligible user ${user.id}.`);
+          return response.status(200).json({ received: true });
+        }
+        const processedSlotSessions = Array.isArray(
+          user.stripeDuoCheckoutSessionIds,
+        )
+          ? user.stripeDuoCheckoutSessionIds
+          : [];
+        if (!processedSlotSessions.includes(session.id)) {
+          const code = await createUniquePaidFamilyToken(users);
+          user.familyInvitationTokens = [
+            ...familyTokensFor(user),
+            {
+              id: crypto.randomUUID(),
+              code,
+              status: "active",
+              createdAt: Date.now(),
+              purchasedAt: Date.now(),
+              stripeCheckoutSessionId: session.id,
+            },
+          ];
+          user.stripeDuoCheckoutSessionIds = [
+            ...processedSlotSessions,
+            session.id,
+          ];
+          await writeUsers(users);
+        }
         return response.status(200).json({ received: true });
       }
 
@@ -1473,10 +1511,10 @@ app.post("/api/checkout", auth, async (request, response) => {
     });
 
   const duoUrl = extraSlotsCheckoutUrl(request.user);
-  if (!duoUrl)
+  if (!duoUrl || !STRIPE_DUO_LINK_ID)
     return response.status(503).json({
       code: "STRIPE_DUO_LINK_INVALID",
-      error: "The 17 DKK extra-slots link is not configured correctly.",
+      error: "The 17 DKK extra-slots link and Payment Link ID are not configured correctly.",
     });
   return response.json({
     product: "extra_slots",
@@ -1655,8 +1693,61 @@ app.post("/api/auth/cancel-subscription", auth, async (request, response) => {
 
 function familyTokensFor(user) {
   return Array.isArray(user?.familyInvitationTokens)
-    ? user.familyInvitationTokens
+    ? user.familyInvitationTokens.filter(
+        (entry) =>
+          typeof entry.stripeCheckoutSessionId === "string" &&
+          entry.stripeCheckoutSessionId.startsWith("cs_"),
+      )
     : [];
+}
+
+async function createUniquePaidFamilyToken(users = readUsers()) {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const reserved = new Set(
+    users.flatMap((account) =>
+      familyTokensFor(account).map((entry) => normalizeRedeemableCode(entry.code)),
+    ),
+  );
+  (await listPremiumCodes()).forEach((entry) =>
+    reserved.add(normalizeRedeemableCode(entry.code)),
+  );
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    let random = "";
+    for (let index = 0; index < 6; index += 1)
+      random += alphabet[crypto.randomInt(0, alphabet.length)];
+    const code = `D50-${random.slice(0, 4)}-${random.slice(4)}`;
+    if (!reserved.has(code)) return code;
+  }
+  throw new Error("Could not generate a unique paid family token.");
+}
+
+function groupSubscriptionState(currentUser, users = readUsers()) {
+  const owner = currentUser.familyOwnerId
+    ? users.find((account) => account.id === currentUser.familyOwnerId) || currentUser
+    : currentUser;
+  const paidTokenIds = new Set(familyTokensFor(owner).map((entry) => entry.id));
+  const members = (Array.isArray(owner.familyMembers) ? owner.familyMembers : [])
+    .filter((member) => paidTokenIds.has(member.tokenId))
+    .map((member) => {
+      const account = users.find((entry) => entry.id === member.userId);
+      return account ? { id: account.id, email: account.email, owner: false } : null;
+    })
+    .filter(Boolean);
+  const canManage = owner.id === currentUser.id || isMasterAdmin(currentUser);
+  const paidTokens = familyTokensFor(owner);
+  return {
+    owner: { id: owner.id, email: owner.email, owner: true },
+    members,
+    activeMemberCount: 1 + members.length,
+    totalSlots: 1 + paidTokens.length,
+    unusedTokens: canManage
+      ? paidTokens
+          .filter((entry) => entry.status === "active")
+          .map((entry) => ({ id: entry.id, code: entry.code }))
+      : [],
+    canManage,
+    canPurchaseExtraSlots: canPurchaseExtraSlots(currentUser),
+  };
 }
 
 async function redeemFamilyToken(code, redeemingUserId) {
@@ -1809,46 +1900,45 @@ async function redeemPremiumCode(code, redeemingUserId) {
   }
 }
 
-app.post("/api/subscription/family-tokens", auth, async (request, response) => {
+app.get("/api/subscription/group", auth, (request, response) => {
   const users = readUsers();
-  const owner = users.find((account) => account.id === request.user.id);
-  if (!owner || !accessFor(owner).paid)
-    return response.status(403).json({
-      error: "An active Premium plan is required to create family invitations.",
-    });
-  const requestedTokens = Array.isArray(request.body.tokens)
-    ? request.body.tokens
-        .map(normalizeRedeemableCode)
-        .filter((code) => /^D50-[A-Z0-9]{4}-[A-Z0-9]{2}$/.test(code))
-        .slice(0, 3)
-    : [];
-  const premiumCodeValues = new Set(
-    (await listPremiumCodes()).map((entry) => normalizeRedeemableCode(entry.code)),
-  );
-  if (requestedTokens.some((code) => premiumCodeValues.has(code)))
-    return response.status(409).json({
-      error: "One of those family tokens is already reserved as a Premium code.",
-    });
-  const existing = familyTokensFor(owner);
-  const byCode = new Map(
-    existing.map((entry) => [normalizeRedeemableCode(entry.code), entry]),
-  );
-  requestedTokens.forEach((code) => {
-    if (!byCode.has(code)) {
-      byCode.set(code, {
-        id: crypto.randomUUID(),
-        code,
-        status: "active",
-        createdAt: Date.now(),
-      });
-    }
-  });
-  owner.familyInvitationTokens = [...byCode.values()].slice(0, 3);
+  const currentUser = users.find((account) => account.id === request.user.id);
+  response.json(groupSubscriptionState(currentUser, users));
+});
+
+app.delete("/api/subscription/family-members/:userId", auth, async (request, response) => {
+  const users = readUsers();
+  const currentUser = users.find((account) => account.id === request.user.id);
+  const owner = currentUser.familyOwnerId
+    ? users.find((account) => account.id === currentUser.familyOwnerId)
+    : currentUser;
+  if (!owner || (owner.id !== currentUser.id && !isMasterAdmin(currentUser)))
+    return response.status(403).json({ error: "Only the plan owner can remove members." });
+  const memberId = String(request.params.userId || "");
+  const membership = (owner.familyMembers || []).find((entry) => entry.userId === memberId);
+  if (!membership)
+    return response.status(404).json({ error: "That family member was not found." });
+  owner.familyMembers = owner.familyMembers.filter((entry) => entry.userId !== memberId);
+  const token = familyTokensFor(owner).find((entry) => entry.id === membership.tokenId);
+  if (token) {
+    token.status = "active";
+    delete token.claimedByUserId;
+    delete token.claimedByEmail;
+    delete token.claimedAt;
+  }
+  const member = users.find((account) => account.id === memberId);
+  if (member && member.premiumSource === "family" && member.familyOwnerId === owner.id) {
+    member.paid = false;
+    member.paidAt = null;
+    member.premiumExpiresAt = null;
+    member.premiumSource = null;
+    member.isSlotMember = false;
+    member.baseSubscriptionOwner = false;
+    member.familyOwnerId = null;
+    member.familyInvitationTokenId = null;
+  }
   await writeUsers(users);
-  response.json({
-    tokens: owner.familyInvitationTokens,
-    members: Array.isArray(owner.familyMembers) ? owner.familyMembers : [],
-  });
+  response.json(groupSubscriptionState(currentUser, users));
 });
 
 app.post("/api/subscription/redeem-code", auth, async (request, response) => {
