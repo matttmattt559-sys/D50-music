@@ -67,10 +67,36 @@ const STRIPE_CURRENCY = String(process.env.STRIPE_CURRENCY || "usd")
 const STRIPE_WEBHOOK_SECRET = String(
   process.env.STRIPE_WEBHOOK_SECRET || "",
 ).trim();
+const STRIPE_PAYMENT_LINK_URL = String(
+  process.env.STRIPE_PAYMENT_LINK_URL || "",
+).trim();
+const STRIPE_PAYMENT_LINK_ID = String(
+  process.env.STRIPE_PAYMENT_LINK_ID || "",
+).trim();
 const APP_BASE_URL = String(process.env.APP_BASE_URL || "")
   .trim()
   .replace(/\/$/, "");
 const stripe = STRIPE_SECRET_KEY ? new Stripe(STRIPE_SECRET_KEY) : null;
+
+function buildStripePaymentLinkUrl(user) {
+  if (!STRIPE_PAYMENT_LINK_URL) return "";
+
+  try {
+    const paymentUrl = new URL(STRIPE_PAYMENT_LINK_URL);
+    if (
+      paymentUrl.protocol !== "https:" ||
+      paymentUrl.hostname !== "buy.stripe.com"
+    ) {
+      return "";
+    }
+
+    paymentUrl.searchParams.set("client_reference_id", String(user.id));
+    paymentUrl.searchParams.set("locked_prefilled_email", String(user.email));
+    return paymentUrl.toString();
+  } catch {
+    return "";
+  }
+}
 const CLOUDINARY_URL = String(process.env.CLOUDINARY_URL || "").trim();
 const CLOUDINARY_CLOUD_NAME = String(
   process.env.CLOUDINARY_CLOUD_NAME || "",
@@ -995,22 +1021,44 @@ app.post(
 
     if (event.type === "checkout.session.completed") {
       const session = event.data.object;
+      const sessionPaymentLinkId =
+        typeof session.payment_link === "string"
+          ? session.payment_link
+          : session.payment_link?.id || "";
+
+      if (
+        STRIPE_PAYMENT_LINK_ID &&
+        sessionPaymentLinkId !== STRIPE_PAYMENT_LINK_ID
+      ) {
+        return response.status(200).json({ received: true });
+      }
+
       const customerEmail = String(
         session.customer_details?.email || session.customer_email || "",
       )
         .trim()
         .toLowerCase();
 
-      if (session.payment_status !== "paid" || !customerEmail) {
+      const referencedUserId = String(
+        session.client_reference_id || session.metadata?.userId || "",
+      ).trim();
+
+      if (session.payment_status !== "paid") {
         return response.status(200).json({ received: true });
       }
 
       const users = readUsers();
-      const user = users.find(
-        (item) => String(item.email || "").toLowerCase() === customerEmail,
-      );
+      const user =
+        users.find((item) => referencedUserId && item.id === referencedUserId) ||
+        users.find(
+          (item) =>
+            customerEmail &&
+            String(item.email || "").toLowerCase() === customerEmail,
+        );
       if (!user) {
-        console.error(`Stripe payment received for unknown email: ${customerEmail}`);
+        console.error(
+          `Stripe payment received for unknown user: ${referencedUserId || customerEmail || "missing reference"}`,
+        );
         return response.status(200).json({ received: true });
       }
 
@@ -1241,6 +1289,21 @@ app.post("/api/auth/subscribe", (_request, response) => {
   });
 });
 async function createCheckoutSession(request, response) {
+  if (STRIPE_PAYMENT_LINK_URL) {
+    const paymentLinkUrl = buildStripePaymentLinkUrl(request.user);
+    if (!paymentLinkUrl) {
+      return response.status(503).json({
+        code: "STRIPE_PAYMENT_LINK_INVALID",
+        error: "The Stripe Payment Link is not configured correctly.",
+      });
+    }
+
+    return response.status(200).json({
+      paymentLink: true,
+      url: paymentLinkUrl,
+    });
+  }
+
   if (!stripe || !STRIPE_SECRET_KEY.startsWith("sk_live_")) {
     return response.status(503).json({
       code: "STRIPE_NOT_CONFIGURED",
