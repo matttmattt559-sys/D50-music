@@ -2157,6 +2157,144 @@ function showPremium(blocking = false) {
   $("#premiumModal").classList.toggle("blocking", blocking);
   $("#premiumModal").hidden = false;
 }
+
+const GROUP_TOKEN_STORAGE_KEY = "d50_group_invitation_tokens";
+const GROUP_FRIEND_REMOVED_KEY = "d50_group_friend_removed";
+
+function generateGroupToken() {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const randomValues = new Uint32Array(6);
+  crypto.getRandomValues(randomValues);
+  const code = Array.from(
+    randomValues,
+    (value) => alphabet[value % alphabet.length],
+  ).join("");
+  return `D50-${code.slice(0, 4)}-${code.slice(4)}`;
+}
+
+function readGroupTokens(requiredCount) {
+  let tokens = [];
+  try {
+    const saved = JSON.parse(localStorage.getItem(GROUP_TOKEN_STORAGE_KEY) || "[]");
+    if (Array.isArray(saved))
+      tokens = saved.filter((token) => /^D50-[A-Z2-9]{4}-[A-Z2-9]{2}$/.test(token));
+  } catch {
+    tokens = [];
+  }
+  while (tokens.length < requiredCount) {
+    const token = generateGroupToken();
+    if (!tokens.includes(token)) tokens.push(token);
+  }
+  tokens = tokens.slice(0, requiredCount);
+  localStorage.setItem(GROUP_TOKEN_STORAGE_KEY, JSON.stringify(tokens));
+  return tokens;
+}
+
+async function copyGroupToken(token, button) {
+  try {
+    await navigator.clipboard.writeText(token);
+  } catch {
+    const helper = document.createElement("textarea");
+    helper.value = token;
+    helper.setAttribute("readonly", "");
+    helper.style.position = "fixed";
+    helper.style.opacity = "0";
+    document.body.append(helper);
+    helper.select();
+    document.execCommand("copy");
+    helper.remove();
+  }
+  const originalText = button.textContent;
+  button.textContent = "Copied!";
+  button.classList.add("text-cyan-200");
+  window.setTimeout(() => {
+    button.textContent = originalText;
+    button.classList.remove("text-cyan-200");
+  }, 1400);
+}
+
+function renderGroupSubscription() {
+  const friendRemoved = localStorage.getItem(GROUP_FRIEND_REMOVED_KEY) === "true";
+  $("#groupOwnerEmail").textContent = user?.email || "owner@example.com";
+  $("#groupFriendRow").hidden = friendRemoved;
+  $("#groupMemberCount").textContent = `${friendRemoved ? 1 : 2} of 4 slots`;
+
+  const tokens = readGroupTokens(friendRemoved ? 3 : 2);
+  const list = $("#groupTokenList");
+  list.replaceChildren();
+  tokens.forEach((token, index) => {
+    const row = document.createElement("div");
+    row.className =
+      "flex flex-col gap-3 rounded-2xl border border-dashed border-cyan-300/20 bg-cyan-300/[0.035] p-4 sm:flex-row sm:items-center sm:justify-between";
+
+    const details = document.createElement("div");
+    details.className = "min-w-0";
+    const label = document.createElement("p");
+    label.className = "m-0 text-xs text-slate-500";
+    label.textContent = `Empty slot ${index + (friendRemoved ? 2 : 3)}`;
+    const code = document.createElement("code");
+    code.className = "mt-1 block font-mono text-base font-bold tracking-[0.14em] text-cyan-100";
+    code.textContent = token;
+    details.append(label, code);
+
+    const copyButton = document.createElement("button");
+    copyButton.type = "button";
+    copyButton.className =
+      "shrink-0 rounded-xl border border-cyan-300/25 bg-cyan-300/10 px-4 py-2.5 text-xs font-bold text-cyan-100 transition hover:bg-cyan-300/20";
+    copyButton.textContent = "Copy Code";
+    copyButton.onclick = () => copyGroupToken(token, copyButton);
+    row.append(details, copyButton);
+    list.append(row);
+  });
+}
+
+function openGroupSubscription() {
+  if (!user) return showAccountGate();
+  $("#groupTokenMessage").textContent = "";
+  renderGroupSubscription();
+  $("#groupSubscriptionModal").hidden = false;
+  $("#closeGroupSubscription").focus();
+}
+
+function closeGroupSubscription() {
+  $("#groupSubscriptionModal").hidden = true;
+}
+
+$("#manageGroupSubscription").onclick = openGroupSubscription;
+$("#closeGroupSubscription").onclick = closeGroupSubscription;
+$("#groupSubscriptionModal").onclick = (event) => {
+  if (event.target === $("#groupSubscriptionModal")) closeGroupSubscription();
+};
+$("#removeGroupFriend").onclick = () => {
+  localStorage.setItem(GROUP_FRIEND_REMOVED_KEY, "true");
+  renderGroupSubscription();
+  $("#groupTokenMessage").textContent =
+    "The member was removed and their slot now has a new invitation token.";
+};
+$("#redeemGroupTokenForm").onsubmit = (event) => {
+  event.preventDefault();
+  const input = $("#groupTokenInput");
+  const enteredToken = input.value.trim().toUpperCase();
+  const tokens = readGroupTokens(
+    localStorage.getItem(GROUP_FRIEND_REMOVED_KEY) === "true" ? 3 : 2,
+  );
+  const tokenIndex = tokens.indexOf(enteredToken);
+  if (tokenIndex === -1) {
+    $("#groupTokenMessage").textContent =
+      "That invitation token is invalid or has already been used.";
+    $("#groupTokenMessage").className =
+      "mb-0 mt-3 min-h-5 text-sm text-rose-300";
+    return;
+  }
+  tokens.splice(tokenIndex, 1);
+  localStorage.setItem(GROUP_TOKEN_STORAGE_KEY, JSON.stringify(tokens));
+  input.value = "";
+  $("#groupTokenMessage").textContent =
+    "Invitation accepted. Group access is active on this browser.";
+  $("#groupTokenMessage").className =
+    "mb-0 mt-3 min-h-5 text-sm text-emerald-300";
+  renderGroupSubscription();
+};
 function maybeShowUploadWarning() {
   if (!user || user.adminMode || user.hasSeenUploadWarning) return;
   $("#uploadWarningText").textContent = user.paid
@@ -3002,6 +3140,7 @@ function updateProfile() {
   $("#playerLike").hidden = !user.premium;
   $("#accountAction").textContent = "Log out";
   $("#accountAction").hidden = false;
+  $("#manageGroupSubscription").hidden = false;
   $("#headerUpgrade").hidden = user.premium;
   $("#cancelSubscriptionButton").hidden =
     !user.paid || Boolean(user.adminMode) || user.autoRenew === false;
@@ -3057,6 +3196,7 @@ function updateGuestProfile() {
   $(".upload-categories").hidden = true;
   $("#playerLike").hidden = true;
   $("#accountAction").hidden = true;
+  $("#manageGroupSubscription").hidden = true;
   $("#headerUpgrade").hidden = true;
   $("#cancelSubscriptionButton").hidden = true;
   $("#adminHubButton").hidden = true;
@@ -3294,9 +3434,8 @@ $$(".modal-close").forEach(
     (button.onclick =
       button.id === "reportConfirmationClose" ? finishReportMode : hideModals),
 );
-$("#upgradeNow").onclick = async () => {
+async function openStripeCheckout(button) {
   if (!user) return showAccountGate();
-  const button = $("#upgradeNow");
   const originalText = button.textContent;
   button.disabled = true;
   button.textContent = "Opening Stripe…";
@@ -3317,7 +3456,9 @@ $("#upgradeNow").onclick = async () => {
     button.disabled = false;
     button.textContent = originalText;
   }
-};
+}
+$("#upgradeNow").onclick = () => openStripeCheckout($("#upgradeNow"));
+$("#groupBuySlots").onclick = () => openStripeCheckout($("#groupBuySlots"));
 setInterval(() => {
   if (user?.adminMode === "master" && !document.hidden)
     syncPendingUploads();
