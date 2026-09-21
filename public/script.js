@@ -2201,7 +2201,22 @@ function step(n, options = {}) {
 }
 $("#prev").onclick = () => step(-1);
 $("#next").onclick = () => step(1);
-$("#start").onclick = () => songs[0] && play(songs[0]);
+const HOME_HERO_DISMISSED_KEY = "d50_home_hero_dismissed";
+const homeHero = $("#homeHero");
+
+function dismissHomeHero() {
+  localStorage.setItem(HOME_HERO_DISMISSED_KEY, "true");
+  homeHero.classList.add("hero-dismissed");
+  homeHero.setAttribute("aria-hidden", "true");
+}
+
+if (localStorage.getItem(HOME_HERO_DISMISSED_KEY) === "true")
+  dismissHomeHero();
+
+$("#start").onclick = () => {
+  dismissHomeHero();
+  if (songs[0]) play(songs[0]);
+};
 
 function configureMediaSession() {
   if (!("mediaSession" in navigator)) return;

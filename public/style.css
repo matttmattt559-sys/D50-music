@@ -2305,6 +2305,9 @@ body.report-mode-active .report-mode-badge button {
     radial-gradient(circle at 75% 50%, #3c8aa655, transparent 32%),
     linear-gradient(118deg, #342050, #15152a 57%, #102c3b);
 }
+.hero.hero-dismissed {
+  display: none !important;
+}
 h1 {
   font-size: 48px;
   letter-spacing: -0.05em;
@@ -2646,6 +2649,29 @@ form > button {
 .library-count {
   margin: -8px 0 22px;
   color: var(--muted);
+}
+.library-songs-list {
+  /* Each desktop song row is 62px tall: 42px artwork + 20px padding. */
+  max-height: 620px;
+  padding-right: 6px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: #5ee7ff88 #100d1b;
+}
+.library-songs-list::-webkit-scrollbar {
+  width: 8px;
+}
+.library-songs-list::-webkit-scrollbar-track {
+  border-radius: 999px;
+  background: #100d1b;
+}
+.library-songs-list::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: linear-gradient(#805cff, #5ee7ff);
+  box-shadow: 0 0 10px #5ee7ff44;
 }
 .library-category-rows {
   display: grid;
@@ -4251,5 +4277,12 @@ button {
   }
   footer.player-footer .controls .skip {
     font-size: 17px;
+  }
+}
+
+@media (max-width: 767px) {
+  .library-songs-list {
+    max-height: min(55dvh, 560px);
+    padding-right: 3px;
   }
 }
