@@ -4518,6 +4518,195 @@ button {
   }
 }
 
+.mobile-for-you-toggle {
+  display: none;
+}
+
+/* Compact reference-style Search screen on phones. */
+@media (max-width: 767px) {
+  header {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 9px;
+    margin-bottom: 8px;
+  }
+  header .header-account {
+    order: 1;
+    width: 100%;
+    justify-content: flex-end;
+  }
+  header > #query {
+    order: 2;
+    width: 100%;
+    min-width: 0;
+    padding: 12px;
+  }
+  #search .search-layout {
+    display: block;
+  }
+  #search .search-primary {
+    position: relative;
+    min-height: 250px;
+    padding-top: 30px;
+  }
+  .mobile-for-you-toggle {
+    position: absolute;
+    z-index: 3;
+    top: 0;
+    right: 0;
+    display: inline-flex;
+    min-height: 26px;
+    align-items: center;
+    justify-content: center;
+    padding: 5px 9px;
+    border: 1px solid #5ee7ff66;
+    border-radius: 7px;
+    color: var(--c);
+    background: #0d1d2a;
+    font-size: 9px;
+    font-weight: 900;
+    letter-spacing: 0.04em;
+  }
+  .mobile-for-you-toggle[aria-expanded="true"] {
+    color: #081016;
+    background: var(--c);
+  }
+  #results {
+    display: grid;
+    gap: 4px;
+  }
+  #results .row,
+  #results .row.has-account-shortcut {
+    min-height: 50px;
+    grid-template-columns: 40px minmax(0, 1fr) auto auto;
+    grid-template-rows: 22px 24px;
+    gap: 2px 7px;
+    padding: 2px 0;
+    background: transparent;
+  }
+  #results .row > .inline-play,
+  #results .row > em,
+  #results .row > .del,
+  #results .row > .row-account-shortcut {
+    display: none !important;
+  }
+  #results .row > i {
+    grid-column: 1;
+    grid-row: 1 / 3;
+    width: 40px;
+    height: 40px;
+    border-radius: 7px;
+  }
+  #results .row > span {
+    grid-column: 2 / 5;
+    grid-row: 1;
+    min-width: 0;
+    align-self: end;
+  }
+  #results .row > span b {
+    display: block;
+    overflow: hidden;
+    font-size: 13px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  #results .row > span small {
+    display: none;
+  }
+  #results .row > .queue-injector {
+    display: inline-flex;
+    grid-column: 2;
+    grid-row: 2;
+    justify-self: start;
+    align-self: start;
+    margin: 0;
+    padding: 2px;
+    transform: scale(0.9);
+    transform-origin: left top;
+  }
+  #results .row > .heart {
+    grid-column: 3;
+    grid-row: 2;
+    width: 28px;
+    height: 24px;
+    padding: 0;
+    align-self: start;
+    font-size: 19px !important;
+  }
+  #results .row > .category-select {
+    display: block;
+    grid-column: 4;
+    grid-row: 2;
+    width: 66px;
+    max-width: 66px;
+    height: 25px;
+    padding: 2px 4px;
+    align-self: start;
+    font-size: 9px;
+  }
+  #results .row > .category-select[hidden] {
+    display: none !important;
+  }
+
+  #search .recommendations-panel {
+    position: static;
+    display: none;
+    margin-top: 10px;
+    padding: 10px 0 0;
+    border: 0;
+    border-top: 1px solid #5ee7ff22;
+    border-radius: 0;
+    background: transparent;
+  }
+  #search .recommendations-panel.mobile-open {
+    display: block;
+  }
+  #search .recommendations-panel > .eye {
+    display: none;
+  }
+  #search .recommendations-heading {
+    justify-content: space-between;
+    margin: 0 0 7px;
+  }
+  #search .recommendations-heading h2 {
+    display: block;
+    font-size: 17px;
+  }
+  #search .recommendations-heading button {
+    padding: 6px 8px;
+    font-size: 10px;
+  }
+  #search .recommendations-list {
+    gap: 4px;
+  }
+  #search .recommendation-card {
+    grid-template-columns: minmax(0, 1fr) 32px auto;
+    min-height: 48px;
+    border-radius: 9px;
+  }
+  #search .recommendation-play {
+    grid-template-columns: 40px minmax(0, 1fr) 20px;
+    gap: 7px;
+    padding: 4px;
+  }
+  #search .recommendation-play i {
+    width: 40px;
+    height: 40px;
+    border-radius: 7px;
+  }
+  #search .recommendation-play b {
+    font-size: 13px;
+  }
+  #search .recommendation-play small {
+    display: none;
+  }
+  #search .recommendation-card > .queue-injector {
+    margin: 0 4px 0 0;
+    transform: scale(0.88);
+    transform-origin: right center;
+  }
+}
+
 /* Reference-style compact mobile player: progress above, track and controls below. */
 @media (max-width: 767px) {
   :root {

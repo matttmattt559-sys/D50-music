@@ -2071,6 +2071,24 @@ function renderRecommendations(refresh = false) {
   updateActiveSong();
 }
 $("#refreshRecommendations").onclick = () => renderRecommendations(true);
+const mobileForYouToggle = $("#mobileForYouToggle");
+const recommendationsPanel = $("#recommendationsPanel");
+
+function setMobileRecommendationsOpen(open) {
+  const isOpen = Boolean(open);
+  recommendationsPanel.classList.toggle("mobile-open", isOpen);
+  mobileForYouToggle.setAttribute("aria-expanded", String(isOpen));
+  mobileForYouToggle.textContent = "FOR YOU";
+}
+
+mobileForYouToggle.onclick = () =>
+  setMobileRecommendationsOpen(
+    !recommendationsPanel.classList.contains("mobile-open"),
+  );
+
+window.addEventListener("resize", () => {
+  if (window.innerWidth >= 768) setMobileRecommendationsOpen(false);
+});
 function renderCategories() {
   if (activeCategory) {
     const list = songs.filter((song) =>

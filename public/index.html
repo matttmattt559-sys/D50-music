@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>D50</title>
-    <link rel="stylesheet" href="style.css?v=20260921-reference-player-3" />
+    <link rel="stylesheet" href="style.css?v=20260921-mobile-search-4" />
     <link rel="stylesheet" href="group-subscription.css?v=20260920-1" />
   </head>
   <body class="dashboard-active">
@@ -209,9 +209,18 @@
       <section id="search" hidden>
         <div class="search-layout">
           <div class="search-primary">
+            <button
+              id="mobileForYouToggle"
+              class="mobile-for-you-toggle"
+              type="button"
+              aria-controls="recommendationsPanel"
+              aria-expanded="false"
+            >
+              FOR YOU
+            </button>
             <div id="results"></div>
           </div>
-          <div class="recommendations-panel">
+          <div id="recommendationsPanel" class="recommendations-panel">
             <p class="eye">FOR YOU</p>
             <div class="recommendations-heading">
               <h2>Maybe you like this</h2>
@@ -591,6 +600,6 @@
         <p id="createCategoryMessage" class="form-message"></p>
       </div>
     </div>
-    <script src="script.js?v=20260921-optimistic-likes-1"></script>
+    <script src="script.js?v=20260921-mobile-search-4"></script>
   </body>
 </html>
