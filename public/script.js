@@ -620,6 +620,21 @@ function rows(el, list) {
     deleteButton.title = `Delete ${s.title}`;
     deleteButton.onclick = () => deleteSong(s);
     appendManagerAccountShortcut(r, s, "row-account-shortcut");
+    if (el.id === "results") {
+      r.classList.add("search-song-row");
+      r.tabIndex = 0;
+      r.setAttribute("role", "button");
+      r.setAttribute("aria-label", `Play ${s.title}`);
+      r.addEventListener("click", (event) => {
+        if (event.target.closest("button, select, option")) return;
+        toggleSong(s, list, el.id);
+      });
+      r.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        toggleSong(s, list, el.id);
+      });
+    }
     el.append(r);
   });
   updateActiveSong();
@@ -2570,6 +2585,7 @@ function closeGroupSubscription() {
 }
 
 $("#manageGroupSubscription").onclick = openGroupSubscription;
+$("#mobileGroupSubscription").onclick = openGroupSubscription;
 $("#closeGroupSubscription").onclick = closeGroupSubscription;
 $("#groupSubscriptionModal").onclick = (event) => {
   if (event.target === $("#groupSubscriptionModal")) closeGroupSubscription();
@@ -3560,6 +3576,7 @@ function updateProfile() {
   $("#accountAction").textContent = "Log out";
   $("#accountAction").hidden = false;
   $("#manageGroupSubscription").hidden = false;
+  $("#mobileGroupSubscription").hidden = false;
   $("#headerUpgrade").hidden = user.premium;
   $("#cancelSubscriptionButton").hidden =
     !user.paid || Boolean(user.adminMode) || user.autoRenew === false;
@@ -3616,6 +3633,7 @@ function updateGuestProfile() {
   $("#playerLike").hidden = true;
   $("#accountAction").hidden = true;
   $("#manageGroupSubscription").hidden = true;
+  $("#mobileGroupSubscription").hidden = true;
   $("#headerUpgrade").hidden = true;
   $("#cancelSubscriptionButton").hidden = true;
   $("#adminHubButton").hidden = true;
