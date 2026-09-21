@@ -2396,6 +2396,17 @@ $("#start").onclick = () => {
 
 function configureMediaSession() {
   if (!("mediaSession" in navigator)) return;
+
+  // Do not advertise podcast-style 10-second seek controls. Removing these
+  // actions lets supported lock screens prioritize Previous/Next Track.
+  ["seekbackward", "seekforward"].forEach((action) => {
+    try {
+      navigator.mediaSession.setActionHandler(action, null);
+    } catch (error) {
+      console.debug(`Media Session action ${action} is unavailable.`, error);
+    }
+  });
+
   const actions = {
     play: () => {
       const song = active();
@@ -2405,8 +2416,8 @@ function configureMediaSession() {
       if (playback?.catch) playback.catch(() => {});
     },
     pause: () => audio.pause(),
-    nexttrack: () => step(1, { immediateBackgroundTransition: true }),
     previoustrack: () => step(-1, { immediateBackgroundTransition: true }),
+    nexttrack: () => step(1, { immediateBackgroundTransition: true }),
   };
   Object.entries(actions).forEach(([action, handler]) => {
     try {
