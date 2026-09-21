@@ -303,21 +303,151 @@ function likeTitle(item, noun = "song") {
       : `Favorite your ${noun} (your own vote does not affect its public score)`;
   return item?.liked ? `Unlike this ${noun}` : `Like this ${noun}`;
 }
-async function like(s) {
+const LIKE_DEBOUNCE_MS = 2000;
+const pendingLikeUpdates = new Map();
+
+function likeUpdateKey(type, itemId) {
+  return `${type}:${itemId}`;
+}
+
+function setHeartState(button, item, noun = "song") {
+  button.textContent = item.liked ? "♥" : "♡";
+  button.classList.toggle("liked", Boolean(item.liked));
+  button.setAttribute(
+    "aria-label",
+    `${item.liked ? "Unlike" : "Like"} ${noun === "category" ? item.name : item.title}`,
+  );
+  button.title = likeTitle(item, noun);
+}
+
+function updateSongLikeElements(song) {
+  $$('[data-song-id]').forEach((element) => {
+    if (element.dataset.songId !== String(song.id)) return;
+    element.querySelectorAll(".heart").forEach((button) =>
+      setHeartState(button, song),
+    );
+    element.querySelectorAll(".song-like-count").forEach(
+      (counter) => (counter.textContent = Number(song.likedCount || 0)),
+    );
+    element.querySelectorAll(".manager-like-total").forEach((counter) => {
+      const total = Number(song.likedCount || 0);
+      counter.textContent = `♥ ${total} public ${total === 1 ? "like" : "likes"}`;
+    });
+  });
+  if (currentId === song.id) heart();
+}
+
+function updateCategoryLikeElements(category) {
+  $$('[data-category-id]').forEach((element) => {
+    if (element.dataset.categoryId !== String(category.id)) return;
+    element
+      .querySelectorAll(".category-card-like, .category-pill-like")
+      .forEach((button) => setHeartState(button, category, "category"));
+    const rankingCount = element.querySelector(".category-ranking-open small");
+    if (rankingCount) {
+      const total = Number(category.likedCount || 0);
+      rankingCount.textContent = `${total} ${total === 1 ? "like" : "likes"}`;
+    }
+    element.querySelectorAll(".manager-like-total").forEach((counter) => {
+      const total = Number(category.likedCount || 0);
+      counter.textContent = `♥ ${total} public ${total === 1 ? "like" : "likes"}`;
+    });
+  });
+}
+
+function applyOptimisticLike(state) {
+  const affectsPublicCount = state.item.ownerId !== user?.id;
+  state.item.liked = state.desiredLiked;
+  state.item.likedCount = Math.max(
+    0,
+    state.confirmedCount +
+      (affectsPublicCount
+        ? Number(state.desiredLiked) - Number(state.confirmedLiked)
+        : 0),
+  );
+  if (state.type === "song") updateSongLikeElements(state.item);
+  else updateCategoryLikeElements(state.item);
+}
+
+async function flushLikeUpdate(key) {
+  const state = pendingLikeUpdates.get(key);
+  if (!state || state.inFlight) return;
+  state.timer = null;
+  if (state.desiredLiked === state.confirmedLiked) {
+    pendingLikeUpdates.delete(key);
+    return;
+  }
+  state.inFlight = true;
+  const sentLiked = state.desiredLiked;
+  const path = state.type === "song"
+    ? `/api/songs/${state.item.id}/like`
+    : `/api/categories/${state.item.id}/like`;
+  const response = await apiFetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ liked: sentLiked }),
+  });
+  if (!response.ok) {
+    state.item.liked = state.confirmedLiked;
+    state.item.likedCount = state.confirmedCount;
+    state.type === "song"
+      ? updateSongLikeElements(state.item)
+      : updateCategoryLikeElements(state.item);
+    pendingLikeUpdates.delete(key);
+    return handleLocked(response);
+  }
+  const updated = await response.json();
+  state.confirmedLiked = Boolean(updated.liked);
+  state.confirmedCount = Number(updated.likedCount || 0);
+  state.inFlight = false;
+  if (state.desiredLiked === state.confirmedLiked) {
+    state.item.liked = state.confirmedLiked;
+    state.item.likedCount = state.confirmedCount;
+    state.type === "song"
+      ? updateSongLikeElements(state.item)
+      : updateCategoryLikeElements(state.item);
+    pendingLikeUpdates.delete(key);
+    return;
+  }
+  applyOptimisticLike(state);
+  const remainingDelay = Math.max(
+    0,
+    LIKE_DEBOUNCE_MS - (Date.now() - state.lastClickAt),
+  );
+  state.timer = window.setTimeout(() => flushLikeUpdate(key), remainingDelay);
+}
+
+function queueOptimisticLike(item, type) {
+  const key = likeUpdateKey(type, item.id);
+  let state = pendingLikeUpdates.get(key);
+  if (!state) {
+    state = {
+      type,
+      item,
+      confirmedLiked: Boolean(item.liked),
+      confirmedCount: Number(item.likedCount || 0),
+      desiredLiked: Boolean(item.liked),
+      lastClickAt: 0,
+      timer: null,
+      inFlight: false,
+    };
+    pendingLikeUpdates.set(key, state);
+  }
+  state.desiredLiked = !state.desiredLiked;
+  state.lastClickAt = Date.now();
+  if (state.timer) window.clearTimeout(state.timer);
+  applyOptimisticLike(state);
+  if (!state.inFlight && state.desiredLiked === state.confirmedLiked) {
+    pendingLikeUpdates.delete(key);
+    return;
+  }
+  state.timer = window.setTimeout(() => flushLikeUpdate(key), LIKE_DEBOUNCE_MS);
+}
+
+function like(song) {
   if (!user) return showAuth(true);
   if (!canLikeSongs()) return showPremium();
-  const next = !s.liked;
-  const response = await apiFetch("/api/songs/" + s.id + "/like", {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ liked: next }),
-  });
-  if (!response.ok) return handleLocked(response);
-  const updated = await response.json();
-  s.liked = updated.liked;
-  s.likedCount = updated.likedCount;
-  render();
-  heart();
+  queueOptimisticLike(song, "song");
 }
 function mediaArtworkUrl(song) {
   if (!song?.coverUrl) return "";
@@ -554,6 +684,7 @@ function renderLibrary() {
     );
     const shelf = document.createElement("section");
     shelf.className = "home-song-shelf library-category-shelf";
+    shelf.dataset.categoryId = category.id;
     const heading = document.createElement("div");
     heading.className = "shelf-heading";
     const name = document.createElement("h2");
@@ -697,53 +828,71 @@ async function syncCreatorStats() {
       renderFreeUploadCapacity();
       if (permissionsChanged) updateProfile();
     }
-    let likesChanged = false;
+    let requiresRender = false;
     latestSongs.forEach((latest) => {
       const existing = songs.find((song) => song.id === latest.id);
       if (existing) {
+        const likeIsPending = pendingLikeUpdates.has(
+          likeUpdateKey("song", existing.id),
+        );
+        const likeChanged =
+          !likeIsPending &&
+          (existing.liked !== latest.liked ||
+            existing.likedCount !== latest.likedCount);
         if (
-          existing.liked !== latest.liked ||
-          existing.likedCount !== latest.likedCount ||
           existing.hasGold !== latest.hasGold ||
           existing.hasSilver !== latest.hasSilver
-        )
-          likesChanged = true;
+        ) requiresRender = true;
         Object.assign(existing, {
-          liked: latest.liked,
-          likedCount: latest.likedCount,
-          selfLikeExcluded: latest.selfLikeExcluded,
+          ...(!likeIsPending
+            ? {
+                liked: latest.liked,
+                likedCount: latest.likedCount,
+                selfLikeExcluded: latest.selfLikeExcluded,
+              }
+            : {}),
           hasGold: latest.hasGold,
           hasSilver: latest.hasSilver,
           goldBoosted: latest.goldBoosted,
           silverBoosted: latest.silverBoosted,
         });
+        if (likeChanged) updateSongLikeElements(existing);
       }
     });
     latestCategories.forEach((latest) => {
       const existing = categories.find((category) => category.id === latest.id);
       if (existing) {
+        const likeIsPending = pendingLikeUpdates.has(
+          likeUpdateKey("category", existing.id),
+        );
+        const likeChanged =
+          !likeIsPending &&
+          (existing.liked !== latest.liked ||
+            existing.likedCount !== latest.likedCount);
         if (
-          existing.liked !== latest.liked ||
-          existing.likedCount !== latest.likedCount ||
           existing.name !== latest.name ||
           existing.hasGold !== latest.hasGold ||
           existing.hasSilver !== latest.hasSilver
-        )
-          likesChanged = true;
+        ) requiresRender = true;
         Object.assign(existing, {
-          liked: latest.liked,
-          likedCount: latest.likedCount,
-          selfLikeExcluded: latest.selfLikeExcluded,
+          ...(!likeIsPending
+            ? {
+                liked: latest.liked,
+                likedCount: latest.likedCount,
+                selfLikeExcluded: latest.selfLikeExcluded,
+              }
+            : {}),
           hasGold: latest.hasGold,
           hasSilver: latest.hasSilver,
           goldBoosted: latest.goldBoosted,
           silverBoosted: latest.silverBoosted,
           name: latest.name,
         });
+        if (likeChanged) updateCategoryLikeElements(existing);
       }
     });
     renderCreatorStats(latestSongs, latestCategories);
-    if (likesChanged) render();
+    if (requiresRender) render();
   } catch {
     // Keep the last known totals visible while the local server reconnects.
   }
@@ -933,19 +1082,10 @@ async function deleteCategory(categoryId, categoryName) {
   if (activeCategory?.id === categoryId) activeCategory = null;
   await load();
 }
-async function likeCategory(category) {
+function likeCategory(category) {
   if (!user) return showAccountGate();
   if (!canLikeSongs()) return showPremium(true);
-  const response = await apiFetch(`/api/categories/${category.id}/like`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ liked: !category.liked }),
-  });
-  if (!response.ok) return handleLocked(response);
-  const updated = await response.json();
-  const index = categories.findIndex((item) => item.id === updated.id);
-  if (index >= 0) categories[index] = updated;
-  render();
+  queueOptimisticLike(category, "category");
 }
 function manageableCategories() {
   if (!user?.canManage) return [];
@@ -1019,6 +1159,7 @@ function renderCategoryFilters() {
   const addPill = (id, label, category = null) => {
     const wrapper = document.createElement("span");
     wrapper.className = "filter-pill-wrap";
+    if (category) wrapper.dataset.categoryId = category.id;
     const button = document.createElement("button");
     button.className = "filter-pill";
     button.classList.toggle("active", homeCategoryFilter === id);
@@ -1156,6 +1297,7 @@ function appendManagerAccountShortcut(card, item, extraClass = "") {
 function createCategoryRankingCard(category) {
   const card = document.createElement("div");
   card.className = "category-ranking-card";
+  card.dataset.categoryId = category.id;
   const isOpen = homeCategoryFilter === category.id;
   card.classList.toggle("is-open", isOpen);
   card.dataset.reportId = category.id;
@@ -1754,6 +1896,7 @@ function renderMyCategoriesManager() {
     );
     const block = document.createElement("article");
     block.className = "managed-category-block";
+    block.dataset.categoryId = category.id;
     block.dataset.reportId = category.id;
     block.dataset.reportName = category.name;
     block.dataset.reportType = "category";

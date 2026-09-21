@@ -2895,7 +2895,7 @@ app.delete("/api/songs/:id", auth, async (request, response) => {
   await writeUsers(users);
   response.status(204).end();
 });
-app.patch("/api/songs/:id/like", auth, premium, async (request, response) => {
+async function updateSongLike(request, response) {
   const songs = readSongs();
   const song = songs.find((item) => item.id === request.params.id);
   if (!song) return response.status(404).json({ error: "Song not found." });
@@ -2906,7 +2906,9 @@ app.patch("/api/songs/:id/like", auth, premium, async (request, response) => {
   song.likedBy = [...likedBy];
   await writeSongs(songs);
   response.json(publicSong(song, request.user));
-});
+}
+app.patch("/api/songs/:id/like", auth, premium, updateSongLike);
+app.post("/api/songs/:id/like", auth, premium, updateSongLike);
 app.get("/api/categories", optionalAuth, (request, response) => {
   const users = readUsers();
   response.json(
@@ -3032,11 +3034,7 @@ app.patch(
     response.json(publicCategory(category, request.user));
   },
 );
-app.patch(
-  "/api/categories/:id/like",
-  auth,
-  premium,
-  async (request, response) => {
+async function updateCategoryLike(request, response) {
     const categories = readCategories();
     const category = categories.find((item) => item.id === request.params.id);
     if (!category || !categoryVisibleTo(category, request.user))
@@ -3069,8 +3067,9 @@ app.patch(
     category.likedBy = [...likedBy];
     await writeCategories(categories);
     response.json(publicCategory(category, request.user));
-  },
-);
+}
+app.patch("/api/categories/:id/like", auth, premium, updateCategoryLike);
+app.post("/api/categories/:id/like", auth, premium, updateCategoryLike);
 app.delete("/api/categories/:id", auth, async (request, response) => {
   const categories = readCategories();
   const category = categories.find((item) => item.id === request.params.id);
