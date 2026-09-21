@@ -1,0 +1,10 @@
+User-agent: *
+Allow: /
+
+# Keep private administration pages and endpoints out of search results.
+Disallow: /admin
+Disallow: /admin/
+Disallow: /api/admin
+Disallow: /api/admin/
+
+Sitemap: https://onrender.com/sitemap.xml
