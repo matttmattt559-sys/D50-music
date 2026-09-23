@@ -2019,9 +2019,6 @@ body.report-mode-active .report-mode-badge button {
   color: var(--muted);
   text-align: center;
 }
-#pendingPreviewAudio {
-  display: none;
-}
 .free-upload-notice {
   margin: 12px 0 16px;
   padding: 12px 14px;

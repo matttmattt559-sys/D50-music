@@ -1,4 +1,4 @@
-const CACHE_NAME = "d50-app-shell-v6";
+const CACHE_NAME = "d50-app-shell-v7";
 const APP_SHELL = [
   "/",
   "/index.html",
@@ -42,6 +42,13 @@ self.addEventListener("fetch", (event) => {
 
   const url = new URL(request.url);
   if (url.origin !== self.location.origin || url.pathname.startsWith("/api/"))
+    return;
+  // Audio is streamed only by the active player. Never cache or fetch audio
+  // on behalf of app-shell resources or upcoming queue entries.
+  if (
+    request.destination === "audio" ||
+    /\.(mp3|wav|m4a|aac|ogg|flac)(?:$|\?)/i.test(url.pathname)
+  )
     return;
 
   event.respondWith(

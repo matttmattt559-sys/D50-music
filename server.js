@@ -2215,7 +2215,6 @@ const MASTER_ADMIN_UI_FRAGMENT = `
     <p>Preview pending tracks before publishing or denying them.</p>
     <div id="freeUploadsList" class="free-uploads-list"></div>
     <p id="freeUploadsMessage" class="form-message"></p>
-    <audio id="pendingPreviewAudio" preload="metadata"></audio>
   </div>
 </div>
 <div id="banAccountModal" class="modal" hidden>

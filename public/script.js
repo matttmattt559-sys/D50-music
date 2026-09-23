@@ -23,11 +23,11 @@ let managerCategoryPriority = null;
 let pendingUploads = [];
 let pendingUploadsLoading = false;
 let pendingPreviewId = null;
+let pendingPreviewSnapshot = null;
 const SONG_PAGE_SIZE = 20;
 let songPage = 0;
 let songsHaveMore = false;
 let songsPageLoading = false;
-const pendingDurationCache = new Map();
 try {
   const savedRows = JSON.parse(
     localStorage.getItem("d50_hidden_default_rows") || "[]",
@@ -362,10 +362,19 @@ function renderNextUp() {
   slot.innerHTML = "";
   const upcomingSlots = nextUpIds
     .slice(0, 4)
-    .map((id, index) => ({
-      index,
-      upcoming: queueSongById(id),
-    }))
+    .map((id, index) => {
+      const song = queueSongById(id);
+      if (!song) return null;
+      return {
+        index,
+        upcoming: {
+          id: String(song.id),
+          title: String(song.title || "Untitled track"),
+          artist: String(song.uploaderName || song.artist || "D50 Artist"),
+        },
+      };
+    })
+    .filter(Boolean)
     .filter((slotItem) => Boolean(slotItem.upcoming));
   if (!upcomingSlots.length) {
     const empty = document.createElement("div");
@@ -383,10 +392,6 @@ function renderNextUp() {
     const cover = document.createElement("div");
     cover.className = "next-up-cover";
     cover.textContent = "◎";
-    if (upcoming.coverUrl) {
-      cover.textContent = "";
-      cover.style.backgroundImage = `url("${upcoming.coverUrl}")`;
-    }
     const copy = document.createElement("div");
     copy.className = "next-up-copy";
     const label = document.createElement("small");
@@ -394,7 +399,7 @@ function renderNextUp() {
     const title = document.createElement("b");
     title.textContent = upcoming.title;
     const source = document.createElement("span");
-    source.textContent = "D50 local catalog";
+    source.textContent = upcoming.artist;
     copy.append(label, title, source);
     const dismiss = document.createElement("button");
     dismiss.className = "next-up-dismiss";
@@ -1179,8 +1184,7 @@ $("#clearManagerAccountFilter").onclick = () => {
 };
 let adminUiPromise = null;
 function purgeAdminUi() {
-  const previewAudio = $("#pendingPreviewAudio");
-  if (previewAudio) previewAudio.pause();
+  if (pendingPreviewId) stopPendingPreview();
   ["adminHubModal", "freeUploadsModal", "banAccountModal"].forEach((id) =>
     document.getElementById(id)?.remove(),
   );
@@ -1192,14 +1196,12 @@ function bindAdminUi() {
   const premiumCodeForm = $("#premiumCodeForm");
   const manualBan = $("#manualBanButton");
   const banForm = $("#banAccountForm");
-  const previewAudio = $("#pendingPreviewAudio");
-  if (!codeForm || !premiumCodeForm || !manualBan || !banForm || !previewAudio)
+  if (!codeForm || !premiumCodeForm || !manualBan || !banForm)
     return false;
   codeForm.onsubmit = handleAdminCodeSubmit;
   premiumCodeForm.onsubmit = handlePremiumCodeSubmit;
   manualBan.onclick = () => openBanAccountModal();
   banForm.onsubmit = handleBanAccountSubmit;
-  previewAudio.addEventListener("ended", handlePendingPreviewEnded);
   $$("#adminHubModal .modal-close, #freeUploadsModal .modal-close, #banAccountModal .modal-close").forEach(
     (button) => (button.onclick = purgeAdminUi),
   );
@@ -2521,6 +2523,10 @@ audio.addEventListener("pause", () => {
 });
 audio.addEventListener("ended", updatePlayButton);
 audio.addEventListener("ended", () => {
+  if (pendingPreviewId) {
+    handlePendingPreviewEnded();
+    return;
+  }
   if (!user) {
     guestPreviewActive = false;
     if (guestListenCount >= 5) showAccountGate();
@@ -2888,9 +2894,7 @@ function hideModals() {
     if (modal.id === "uploadWarningModal" && !user?.hasSeenUploadWarning) return;
     modal.hidden = true;
   });
-  const previewAudio = $("#pendingPreviewAudio");
-  if (previewAudio) previewAudio.pause();
-  pendingPreviewId = null;
+  if (pendingPreviewId) stopPendingPreview();
   if ($("#adminHubModal")) purgeAdminUi();
 }
 function showAccountGate() {
@@ -3417,30 +3421,62 @@ $("#adminHubButton").onclick = async () => {
 function updateFreeUploadsCount() {
   $("#freeUploadsCount").textContent = String(pendingUploads.length);
 }
-function pendingTrackDuration(url) {
-  if (!url) return Promise.resolve(null);
-  if (pendingDurationCache.has(url)) return pendingDurationCache.get(url);
-  const durationPromise = new Promise((resolve) => {
-    const probe = new Audio();
-    let finished = false;
-    const finish = (duration = null) => {
-      if (finished) return;
-      finished = true;
-      clearTimeout(timeout);
-      probe.removeAttribute("src");
-      probe.load();
-      resolve(Number.isFinite(duration) && duration >= 0 ? duration : null);
+function startPendingPreview(track) {
+  if (!pendingPreviewSnapshot) {
+    pendingPreviewSnapshot = {
+      src: audio.currentSrc || audio.src || "",
+      currentTime: Number(audio.currentTime || 0),
+      wasPlaying: !audio.paused,
+      currentId,
+      queue: [...queue],
+      queueScope,
+      nextUpIds: [...nextUpIds],
     };
-    const timeout = setTimeout(() => finish(), 12000);
-    probe.preload = "metadata";
-    probe.addEventListener("loadedmetadata", () => finish(probe.duration), {
-      once: true,
-    });
-    probe.addEventListener("error", () => finish(), { once: true });
-    probe.src = url;
-  });
-  pendingDurationCache.set(url, durationPromise);
-  return durationPromise;
+  }
+  audio.pause();
+  pendingPreviewId = track.id;
+  currentId = null;
+  audio.src = track.url;
+  $("#now").textContent = `Preview: ${track.title || "Untitled track"}`;
+  updateActiveSong();
+  heart();
+  renderPendingUploads();
+  return audio.play();
+}
+
+function stopPendingPreview() {
+  if (!pendingPreviewId && !pendingPreviewSnapshot) return;
+  audio.pause();
+  pendingPreviewId = null;
+  const snapshot = pendingPreviewSnapshot;
+  pendingPreviewSnapshot = null;
+  if (!snapshot) return;
+  currentId = snapshot.currentId;
+  queue = snapshot.queue;
+  queueScope = snapshot.queueScope;
+  nextUpIds = snapshot.nextUpIds;
+  if (snapshot.src) {
+    audio.src = snapshot.src;
+    const restorePosition = () => {
+      if (Number.isFinite(snapshot.currentTime))
+        audio.currentTime = Math.min(
+          snapshot.currentTime,
+          audio.duration || snapshot.currentTime,
+        );
+      if (snapshot.wasPlaying) audio.play().catch(() => {});
+    };
+    if (audio.readyState >= 1) restorePosition();
+    else audio.addEventListener("loadedmetadata", restorePosition, { once: true });
+  } else {
+    audio.removeAttribute("src");
+    audio.load();
+  }
+  $("#now").textContent = active()?.title || "Choose a song";
+  fillNextUp(snapshot.nextUpIds);
+  updateActiveSong();
+  heart();
+  const modal = $("#freeUploadsModal");
+  if (modal && !modal.hidden) renderPendingUploads();
 }
 function renderPendingUploads() {
   const list = $("#freeUploadsList");
@@ -3474,17 +3510,18 @@ function renderPendingUploads() {
     title.textContent = track.title || "Untitled track";
     const duration = document.createElement("span");
     duration.className = "free-upload-duration";
-    duration.textContent = "–:––";
-    duration.setAttribute("aria-label", "Loading track duration");
+    const storedDuration = Number(track.duration);
+    duration.textContent =
+      Number.isFinite(storedDuration) && storedDuration > 0
+        ? fmt(storedDuration)
+        : "–:––";
+    duration.setAttribute(
+      "aria-label",
+      Number.isFinite(storedDuration) && storedDuration > 0
+        ? `Duration ${fmt(storedDuration)}`
+        : "Track duration unavailable",
+    );
     titleLine.append(title, duration);
-    pendingTrackDuration(track.url).then((seconds) => {
-      if (!duration.isConnected) return;
-      duration.textContent = seconds === null ? "–:––" : fmt(seconds);
-      duration.setAttribute(
-        "aria-label",
-        seconds === null ? "Track duration unavailable" : `Duration ${fmt(seconds)}`,
-      );
-    });
     const accountLine = document.createElement("div");
     accountLine.className = "free-upload-account-line";
     const email = document.createElement("span");
@@ -3507,22 +3544,11 @@ function renderPendingUploads() {
     preview.className = "pending-preview-button";
     preview.textContent = pendingPreviewId === track.id ? "⏸ Stop" : "▶ Preview";
     preview.onclick = async () => {
-      const previewAudio = $("#pendingPreviewAudio");
-      if (pendingPreviewId === track.id && !previewAudio.paused) {
-        previewAudio.pause();
-        pendingPreviewId = null;
-        renderPendingUploads();
-        return;
-      }
-      previewAudio.pause();
-      previewAudio.src = track.url;
-      pendingPreviewId = track.id;
-      renderPendingUploads();
+      if (pendingPreviewId === track.id) return stopPendingPreview();
       try {
-        await previewAudio.play();
+        await startPendingPreview(track);
       } catch {
-        pendingPreviewId = null;
-        renderPendingUploads();
+        stopPendingPreview();
         $("#freeUploadsMessage").textContent = "Preview could not be played.";
       }
     };
@@ -3543,8 +3569,7 @@ function renderPendingUploads() {
         approve.disabled = false;
         return handleLocked(response);
       }
-      if (pendingPreviewId === track.id) $("#pendingPreviewAudio")?.pause();
-      pendingPreviewId = null;
+      if (pendingPreviewId === track.id) stopPendingPreview();
       if ($("#freeUploadsMessage"))
         $("#freeUploadsMessage").textContent = `${track.title} is now published.`;
       await Promise.all([syncPendingUploads(true), load()]);
@@ -3564,8 +3589,7 @@ function renderPendingUploads() {
         deny.disabled = false;
         return handleLocked(response);
       }
-      if (pendingPreviewId === track.id) $("#pendingPreviewAudio")?.pause();
-      pendingPreviewId = null;
+      if (pendingPreviewId === track.id) stopPendingPreview();
       if ($("#freeUploadsMessage"))
         $("#freeUploadsMessage").textContent = `${track.title} was denied.`;
       await syncPendingUploads(true);
@@ -3602,9 +3626,7 @@ $("#freeUploadsButton").onclick = async () => {
   if ($("#freeUploadsMessage")) $("#freeUploadsMessage").textContent = "";
 };
 function handlePendingPreviewEnded() {
-  pendingPreviewId = null;
-  const modal = $("#freeUploadsModal");
-  if (modal && !modal.hidden) renderPendingUploads();
+  stopPendingPreview();
 }
 let reportModeActive = false;
 let reportSelectionLocked = false;
