@@ -55,7 +55,7 @@ function cleanText(value, maximumLength) {
 function apiFetch(url, options = {}) {
   const headers = new Headers(options.headers || {});
   if (sessionToken) headers.set("Authorization", `Bearer ${sessionToken}`);
-  return fetch(url, { ...options, headers });
+  return fetch(url, { credentials: "same-origin", ...options, headers });
 }
 const sidebar = $("aside");
 const sidebarCollapsed =
@@ -639,6 +639,63 @@ function rows(el, list) {
   });
   updateActiveSong();
 }
+
+function updateHorizontalScrollButtons(scroller) {
+  const shelf = scroller?.closest(".horizontal-scroll-controls");
+  if (!shelf) return;
+  const previous = shelf.querySelector(".horizontal-scroll-button.previous");
+  const next = shelf.querySelector(".horizontal-scroll-button.next");
+  if (!previous || !next) return;
+  const maximum = Math.max(0, scroller.scrollWidth - scroller.clientWidth);
+  const canScroll = maximum > 4;
+  previous.hidden = !canScroll;
+  next.hidden = !canScroll;
+  previous.disabled = !canScroll || scroller.scrollLeft <= 3;
+  next.disabled = !canScroll || scroller.scrollLeft >= maximum - 3;
+}
+
+function addHorizontalScrollButtons(scroller) {
+  if (!scroller || scroller.dataset.scrollButtons === "true") return;
+  const shelf = scroller.parentElement;
+  if (!shelf) return;
+  scroller.dataset.scrollButtons = "true";
+  shelf.classList.add("horizontal-scroll-controls");
+
+  const makeButton = (direction) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `horizontal-scroll-button ${direction}`;
+    button.textContent = direction === "previous" ? "‹" : "›";
+    button.setAttribute(
+      "aria-label",
+      direction === "previous" ? "Scroll left" : "Scroll right",
+    );
+    button.onclick = (event) => {
+      event.stopPropagation();
+      const distance = Math.max(220, Math.round(scroller.clientWidth * 0.82));
+      scroller.scrollBy({
+        left: direction === "previous" ? -distance : distance,
+        behavior: "smooth",
+      });
+    };
+    return button;
+  };
+
+  shelf.append(makeButton("previous"), makeButton("next"));
+  scroller.addEventListener(
+    "scroll",
+    () => updateHorizontalScrollButtons(scroller),
+    { passive: true },
+  );
+  requestAnimationFrame(() => updateHorizontalScrollButtons(scroller));
+}
+
+window.addEventListener("resize", () => {
+  $$(".horizontal-scroll-controls > .horizontal-scroll-row").forEach(
+    updateHorizontalScrollButtons,
+  );
+});
+
 function renderLibrary() {
   const container = $("#songs");
   const count = $("#libraryCount");
@@ -735,6 +792,7 @@ function renderLibrary() {
     }
     shelf.append(heading, row);
     categoryContainer.append(shelf);
+    addHorizontalScrollButtons(row);
   });
 }
 function syncFreeUploadCapacityFromManagedUploads() {
@@ -1425,6 +1483,7 @@ function renderCategoryRankings(refreshDiscoveries = false) {
     );
     shelf.append(headingBar, row);
     container.append(shelf);
+    addHorizontalScrollButtons(row);
   };
   addRow("Top 10 most liked categories", top);
   addRow("10 random discoveries", discoveries, true);
@@ -1552,6 +1611,7 @@ function renderHomeSongRows() {
     }
     shelf.append(heading, row);
     container.append(shelf);
+    addHorizontalScrollButtons(row);
   });
 }
 function renderUploadCategories() {
@@ -3043,7 +3103,9 @@ async function handleAdminCodeSubmit(event) {
   }
 }
 
+let premiumCodeRefreshTimer = null;
 function renderPremiumCodes(codes) {
+  clearTimeout(premiumCodeRefreshTimer);
   const panel = $("#premiumCodesPanel");
   panel.replaceChildren();
   if (!codes.length) {
@@ -3062,9 +3124,13 @@ function renderPremiumCodes(codes) {
     duration.textContent = `${Number(entry.durationDays)} days`;
     const status = document.createElement("span");
     status.className = `admin-code-status ${entry.isUsed ? "redeemed" : "active"}`;
-    status.textContent = entry.isUsed
-      ? `Redeemed by ${entry.claimedBy || "unknown user"}`
-      : "Unused";
+    if (entry.isUsed) {
+      const days = Math.max(0, Number(entry.remainingDays || 0));
+      const timeLeft = entry.expiresAt
+        ? `${days} ${days === 1 ? "day" : "days"} left`
+        : "expiry unavailable";
+      status.textContent = `Redeemed by ${entry.claimedBy || "unknown user"} · ${timeLeft}`;
+    } else status.textContent = "Unused";
     const revoke = document.createElement("button");
     revoke.type = "button";
     revoke.className = "revoke-admin-code";
@@ -3084,6 +3150,21 @@ function renderPremiumCodes(codes) {
     row.append(code, duration, status, revoke);
     panel.append(row);
   });
+  const nextExpiry = codes
+    .filter((entry) => entry.isUsed && Number(entry.expiresAt) > Date.now())
+    .reduce(
+      (nearest, entry) => Math.min(nearest, Number(entry.expiresAt)),
+      Number.POSITIVE_INFINITY,
+    );
+  if (Number.isFinite(nextExpiry)) {
+    const delay = Math.min(
+      60 * 60 * 1000,
+      Math.max(1000, nextExpiry - Date.now() + 1000),
+    );
+    premiumCodeRefreshTimer = setTimeout(() => {
+      if (!$("#adminHubModal").hidden) loadAdminHub();
+    }, delay);
+  }
 }
 
 async function handlePremiumCodeSubmit(event) {
@@ -3740,15 +3821,13 @@ $("#authScreen").onclick = (event) => {
   if (event.target === $("#authScreen")) closeAuthGate();
 };
 async function restoreSavedSession() {
-  if (!sessionToken) {
-    showGuestApp();
-    return;
-  }
-
   try {
     const response = await apiFetch("/api/auth/me", { cache: "no-store" });
     if (response.ok) {
       user = await response.json();
+      // The backend has promoted any old bearer token to a 30-day HTTP-only cookie.
+      sessionToken = "";
+      localStorage.removeItem("d50_session");
       showApp();
       return;
     }
@@ -3784,6 +3863,7 @@ $("#authForm").onsubmit = async (event) => {
   $("#authMessage").textContent = "Please wait…";
   const response = await fetch(`/api/auth/${signupMode ? "signup" : "login"}`, {
     method: "POST",
+    credentials: "same-origin",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       email: $("#authEmail").value,
@@ -3794,8 +3874,9 @@ $("#authForm").onsubmit = async (event) => {
   if (!response.ok)
     return ($("#authMessage").textContent =
       data.error || "Could not continue.");
-  sessionToken = data.token;
-  localStorage.setItem("d50_session", sessionToken);
+  // Authentication is persisted by a secure 30-day HTTP-only cookie.
+  sessionToken = "";
+  localStorage.removeItem("d50_session");
   user = data.user;
   $("#authForm").reset();
   guestPreviewActive = false;

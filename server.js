@@ -55,6 +55,8 @@ const FREE_APPROVED_UPLOAD_LIMIT = 100;
 const FREE_PENDING_UPLOAD_LIMIT = 5;
 const PREMIUM_PERIOD_DAYS = 30;
 const PREMIUM_PERIOD_MS = PREMIUM_PERIOD_DAYS * 24 * 60 * 60 * 1000;
+const SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
+const SESSION_MAX_AGE_MS = SESSION_MAX_AGE_SECONDS * 1000;
 const STRIPE_SECRET_KEY = String(process.env.STRIPE_SECRET_KEY || "").trim();
 const STRIPE_PUBLISHABLE_KEY = String(
   process.env.STRIPE_PUBLISHABLE_KEY || "",
@@ -335,25 +337,71 @@ function normalizeRedeemableCode(value) {
 }
 
 function serializePremiumCode(row) {
+  const expiresAt = Number(row.expires_at ?? row.expiresAt ?? 0) || null;
   return {
     id: row.id,
     code: row.code,
     durationDays: Number(row.duration_days ?? row.durationDays),
     isUsed: Boolean(row.is_used ?? row.isUsed),
     claimedBy: row.claimed_by ?? row.claimedBy ?? null,
+    claimedAt: Number(row.claimed_at ?? row.claimedAt ?? 0) || null,
+    expiresAt,
+    remainingDays: expiresAt
+      ? Math.max(0, Math.ceil((expiresAt - Date.now()) / 86400000))
+      : null,
   };
 }
 
 async function listPremiumCodes() {
+  const now = Date.now();
   if (DATABASE_PROVIDER === "postgres") {
+    // Remove redeemed codes as soon as the Premium time granted by them ends.
+    await postgres.query(
+      "DELETE FROM premium_codes WHERE is_used = TRUE AND expires_at IS NOT NULL AND expires_at <= $1",
+      [now],
+    );
     const result = await postgres.query(
-      `SELECT id, code, duration_days, is_used, claimed_by
+      `SELECT id, code, duration_days, is_used, claimed_by, claimed_at, expires_at
        FROM premium_codes
        ORDER BY code ASC`,
     );
-    return result.rows.map(serializePremiumCode);
+    const users = readUsers();
+    const expiredLegacyIds = [];
+    const entries = result.rows.map(serializePremiumCode).filter((entry) => {
+      if (!entry.isUsed || entry.expiresAt) return true;
+      const claimant = users.find((account) => account.premiumCodeId === entry.id);
+      entry.expiresAt = Number(claimant?.premiumExpiresAt || 0) || null;
+      entry.remainingDays = entry.expiresAt
+        ? Math.max(0, Math.ceil((entry.expiresAt - now) / 86400000))
+        : null;
+      if (entry.expiresAt && entry.expiresAt <= now) {
+        expiredLegacyIds.push(entry.id);
+        return false;
+      }
+      return true;
+    });
+    if (expiredLegacyIds.length)
+      await postgres.query("DELETE FROM premium_codes WHERE id = ANY($1::text[])", [
+        expiredLegacyIds,
+      ]);
+    return entries;
   }
-  return readLocalPremiumCodes().map(serializePremiumCode);
+  const users = readUsers();
+  const allCodes = readLocalPremiumCodes().map(serializePremiumCode);
+  const activeCodes = allCodes.filter((entry) => {
+    if (!entry.isUsed) return true;
+    if (!entry.expiresAt) {
+      const claimant = users.find((account) => account.premiumCodeId === entry.id);
+      entry.expiresAt = Number(claimant?.premiumExpiresAt || 0) || null;
+      entry.remainingDays = entry.expiresAt
+        ? Math.max(0, Math.ceil((entry.expiresAt - now) / 86400000))
+        : null;
+    }
+    return !entry.expiresAt || entry.expiresAt > now;
+  });
+  if (activeCodes.length !== allCodes.length)
+    await writeLocalPremiumCodes(activeCodes);
+  return activeCodes;
 }
 
 async function createPremiumCodeRecord(code, durationDays) {
@@ -363,12 +411,14 @@ async function createPremiumCodeRecord(code, durationDays) {
     durationDays,
     isUsed: false,
     claimedBy: null,
+    claimedAt: null,
+    expiresAt: null,
   };
   if (DATABASE_PROVIDER === "postgres") {
     const result = await postgres.query(
       `INSERT INTO premium_codes (id, code, duration_days)
        VALUES ($1, $2, $3)
-       RETURNING id, code, duration_days, is_used, claimed_by`,
+       RETURNING id, code, duration_days, is_used, claimed_by, claimed_at, expires_at`,
       [entry.id, entry.code, entry.durationDays],
     );
     return serializePremiumCode(result.rows[0]);
@@ -443,8 +493,16 @@ async function initializePostgresSchema() {
     code TEXT NOT NULL UNIQUE,
     duration_days INTEGER NOT NULL CHECK (duration_days > 0),
     is_used BOOLEAN NOT NULL DEFAULT FALSE,
-    claimed_by TEXT DEFAULT NULL
+    claimed_by TEXT DEFAULT NULL,
+    claimed_at BIGINT DEFAULT NULL,
+    expires_at BIGINT DEFAULT NULL
   )`);
+  await postgres.query(
+    "ALTER TABLE premium_codes ADD COLUMN IF NOT EXISTS claimed_at BIGINT DEFAULT NULL",
+  );
+  await postgres.query(
+    "ALTER TABLE premium_codes ADD COLUMN IF NOT EXISTS expires_at BIGINT DEFAULT NULL",
+  );
   await postgres.query(
     "CREATE UNIQUE INDEX IF NOT EXISTS users_email_lower_idx ON users (LOWER(email))",
   );
@@ -704,6 +762,16 @@ function sessionToken(request) {
 function tokenHash(token) {
   return crypto.createHash("sha256").update(String(token)).digest("hex");
 }
+function sessionCookie(token, maxAge = SESSION_MAX_AGE_SECONDS) {
+  const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
+  return `d50_session=${encodeURIComponent(token)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAge}${secure}`;
+}
+function startUserSession(user) {
+  const token = crypto.randomBytes(32).toString("hex");
+  user.sessionTokenHash = tokenHash(token);
+  user.sessionExpiresAt = Date.now() + SESSION_MAX_AGE_MS;
+  return token;
+}
 function hasRedeemedFreeAdminCode(user) {
   if (!user?.freeAdminCodeId) return false;
   return readCodes().some(
@@ -923,7 +991,23 @@ async function auth(request, response, next) {
     (item) => item.sessionTokenHash && item.sessionTokenHash === digest,
   );
   if (!user) return response.status(401).json({ error: "Please log in." });
-  if (normalizePremiumExpiration(user)) await writeUsers(users);
+  const expiresAt = Number(user.sessionExpiresAt || 0);
+  if (expiresAt > 0 && expiresAt <= Date.now()) {
+    user.sessionTokenHash = null;
+    user.sessionExpiresAt = null;
+    await writeUsers(users);
+    response.setHeader("Set-Cookie", sessionCookie("", 0));
+    return response.status(401).json({ error: "Your session has expired. Please log in again." });
+  }
+  let changed = normalizePremiumExpiration(user);
+  // Migrate sessions created before the 30-day expiry field was introduced.
+  if (!expiresAt) {
+    user.sessionExpiresAt = Date.now() + SESSION_MAX_AGE_MS;
+    changed = true;
+  }
+  if (changed) await writeUsers(users);
+  // A legacy localStorage bearer token is promoted to the safer HTTP-only cookie.
+  response.setHeader("Set-Cookie", sessionCookie(token));
   request.user = user;
   next();
 }
@@ -932,7 +1016,11 @@ function optionalAuth(request, _response, next) {
   const digest = token ? tokenHash(token) : "";
   request.user =
     readUsers().find(
-      (item) => item.sessionTokenHash && item.sessionTokenHash === digest,
+      (item) =>
+        item.sessionTokenHash &&
+        item.sessionTokenHash === digest &&
+        (!Number(item.sessionExpiresAt || 0) ||
+          Number(item.sessionExpiresAt) > Date.now()),
     ) || null;
   next();
 }
@@ -1420,16 +1508,15 @@ app.post("/api/auth/signup", async (request, response) => {
     adminLockedUntil: null,
     isAdminBanned: false,
   };
-  const token = crypto.randomBytes(32).toString("hex");
-  user.sessionTokenHash = tokenHash(token);
+  const token = startUserSession(user);
   users.push(user);
   await writeUsers(users);
   if (user.role === "owner") await migrateLegacyOwnership(user.id);
   response.setHeader(
     "Set-Cookie",
-    `d50_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000`,
+    sessionCookie(token),
   );
-  response.status(201).json({ token, user: publicUser(user) });
+  response.status(201).json({ user: publicUser(user) });
 });
 app.post("/api/auth/login", async (request, response) => {
   const email = String(request.body.email || "")
@@ -1438,7 +1525,7 @@ app.post("/api/auth/login", async (request, response) => {
   const user = readUsers().find((item) => item.email === email);
   if (!user || !passwordMatches(String(request.body.password || ""), user))
     return response.status(401).json({ error: "Incorrect email or password." });
-  const token = crypto.randomBytes(32).toString("hex");
+  const token = startUserSession(user);
   normalizePremiumExpiration(user);
   const permanentAdmin = Boolean(
     user.isAdmin || user.role === "admin" || hasRedeemedFreeAdminCode(user),
@@ -1446,15 +1533,14 @@ app.post("/api/auth/login", async (request, response) => {
   user.isAdmin = permanentAdmin;
   if (permanentAdmin && user.role !== "owner") user.role = "admin";
   user.adminMode = permanentAdmin ? "free" : false;
-  user.sessionTokenHash = tokenHash(token);
   await writeUsers(
     readUsers().map((item) => (item.id === user.id ? user : item)),
   );
   response.setHeader(
     "Set-Cookie",
-    `d50_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000`,
+    sessionCookie(token),
   );
-  response.json({ token, user: publicUser(user) });
+  response.json({ user: publicUser(user) });
 });
 app.post("/api/auth/subscribe", (_request, response) => {
   response.status(410).json({
@@ -1527,12 +1613,13 @@ app.post("/api/auth/logout", auth, async (request, response) => {
   const user = users.find((item) => item.id === request.user.id);
   if (user) {
     user.sessionTokenHash = null;
+    user.sessionExpiresAt = null;
     user.adminMode = false;
   }
   await writeUsers(users);
   response.setHeader(
     "Set-Cookie",
-    "d50_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0",
+    sessionCookie("", 0),
   );
   response.status(204).end();
 });
@@ -1827,6 +1914,8 @@ async function redeemPremiumCode(code, redeemingUserId) {
     member.premiumCodeId = premiumCode.id;
     premiumCode.isUsed = true;
     premiumCode.claimedBy = member.email;
+    premiumCode.claimedAt = now;
+    premiumCode.expiresAt = member.premiumExpiresAt;
     await Promise.all([writeUsers(users), writeLocalPremiumCodes(codes)]);
     return { type: "premium", durationDays, user: publicUser(member) };
   }
@@ -1835,7 +1924,7 @@ async function redeemPremiumCode(code, redeemingUserId) {
   try {
     await client.query("BEGIN");
     const codeResult = await client.query(
-      `SELECT id, code, duration_days, is_used, claimed_by
+      `SELECT id, code, duration_days, is_used, claimed_by, claimed_at, expires_at
        FROM premium_codes
        WHERE code = $1
        FOR UPDATE`,
@@ -1873,9 +1962,9 @@ async function redeemPremiumCode(code, redeemingUserId) {
     member.premiumCodeId = premiumCode.id;
     await client.query(
       `UPDATE premium_codes
-       SET is_used = TRUE, claimed_by = $2
+       SET is_used = TRUE, claimed_by = $2, claimed_at = $3, expires_at = $4
        WHERE id = $1`,
-      [premiumCode.id, member.email],
+      [premiumCode.id, member.email, now, member.premiumExpiresAt],
     );
     await client.query(
       `UPDATE users

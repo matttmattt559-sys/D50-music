@@ -2539,6 +2539,44 @@ form > button {
 .horizontal-scroll-row::-webkit-scrollbar-thumb:hover {
   background: linear-gradient(90deg, #916fff, #5ee7ff);
 }
+.horizontal-scroll-controls {
+  position: relative;
+}
+.horizontal-scroll-button {
+  position: absolute;
+  z-index: 14;
+  top: 58%;
+  display: grid;
+  width: 40px;
+  height: 40px;
+  place-items: center;
+  padding: 0 0 3px;
+  border: 1px solid #5ee7ff66;
+  border-radius: 50%;
+  color: white;
+  background: #0b1424e8;
+  box-shadow: 0 7px 24px #000a, 0 0 16px #5ee7ff26;
+  font-size: 31px;
+  line-height: 1;
+  transform: translateY(-50%);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+.horizontal-scroll-button.previous {
+  left: 6px;
+}
+.horizontal-scroll-button.next {
+  right: 6px;
+}
+.horizontal-scroll-button:hover:not(:disabled) {
+  border-color: var(--c);
+  background: #173044f2;
+  box-shadow: 0 7px 24px #000a, 0 0 20px #5ee7ff55;
+}
+.horizontal-scroll-button:disabled {
+  cursor: default;
+  opacity: 0.22;
+}
 .recently-uploaded-container,
 .trending-container,
 .category-track-container {
@@ -4335,6 +4373,18 @@ button {
   }
   .category-ranking-row::-webkit-scrollbar {
     display: none;
+  }
+  .horizontal-scroll-button {
+    width: 32px;
+    height: 32px;
+    border-radius: 10px;
+    font-size: 25px;
+  }
+  .horizontal-scroll-button.previous {
+    left: 3px;
+  }
+  .horizontal-scroll-button.next {
+    right: 3px;
   }
   .category-ranking-card {
     flex: 0 0 138px;
