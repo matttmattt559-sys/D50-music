@@ -113,6 +113,133 @@ mobileQueueToggle.onclick = () =>
   setMobileQueueOpen(!$("#nextUpPanel").classList.contains("mobile-open"));
 queueDrawerClose.onclick = () => setMobileQueueOpen(false, true);
 queueDrawerBackdrop.onclick = () => setMobileQueueOpen(false, true);
+
+const MOBILE_SWIPE_CLOSE_THRESHOLD = 150;
+const MOBILE_SWIPE_START_REGION = 96;
+
+function attachMobileSwipeToClose(panel, surface, closeView) {
+  if (!panel || !surface || surface.dataset.swipeCloseReady === "true") return;
+  surface.dataset.swipeCloseReady = "true";
+  surface.classList.add("mobile-swipe-surface");
+
+  let startX = 0;
+  let startY = 0;
+  let distance = 0;
+  let tracking = false;
+  let dragging = false;
+
+  function clearGestureClasses() {
+    surface.classList.remove(
+      "swipe-dragging",
+      "swipe-resetting",
+      "swipe-dismissing",
+    );
+    surface.style.removeProperty("--swipe-close-y");
+  }
+
+  surface.addEventListener(
+    "touchstart",
+    (event) => {
+      if (
+        event.touches.length !== 1 ||
+        !window.matchMedia("(max-width: 767px)").matches ||
+        navigator.maxTouchPoints < 1 ||
+        panel.hidden
+      )
+        return;
+      const touch = event.touches[0];
+      const bounds = surface.getBoundingClientRect();
+      if (touch.clientY > bounds.top + MOBILE_SWIPE_START_REGION) return;
+      clearGestureClasses();
+      startX = touch.clientX;
+      startY = touch.clientY;
+      distance = 0;
+      tracking = true;
+      dragging = false;
+    },
+    { passive: true },
+  );
+
+  surface.addEventListener(
+    "touchmove",
+    (event) => {
+      if (!tracking || event.touches.length !== 1) return;
+      const touch = event.touches[0];
+      const deltaX = Math.abs(touch.clientX - startX);
+      const deltaY = touch.clientY - startY;
+      if (!dragging && (deltaY <= 8 || deltaY <= deltaX)) return;
+      dragging = true;
+      distance = Math.max(0, deltaY);
+      surface.classList.add("swipe-dragging");
+      surface.style.setProperty("--swipe-close-y", `${distance}px`);
+      event.preventDefault();
+    },
+    { passive: false },
+  );
+
+  surface.addEventListener("touchend", (event) => {
+    if (!tracking) return;
+    if (event.changedTouches.length) {
+      distance = Math.max(
+        distance,
+        event.changedTouches[0].clientY - startY,
+      );
+    }
+    tracking = false;
+    surface.classList.remove("swipe-dragging");
+    if (dragging && distance > MOBILE_SWIPE_CLOSE_THRESHOLD) {
+      surface.classList.add("swipe-dismissing");
+      window.setTimeout(() => {
+        closeView();
+        clearGestureClasses();
+      }, 180);
+      return;
+    }
+    surface.classList.add("swipe-resetting");
+    surface.style.setProperty("--swipe-close-y", "0px");
+    window.setTimeout(clearGestureClasses, 220);
+  });
+
+  surface.addEventListener("touchcancel", () => {
+    if (!tracking) return;
+    tracking = false;
+    surface.classList.remove("swipe-dragging");
+    surface.classList.add("swipe-resetting");
+    surface.style.setProperty("--swipe-close-y", "0px");
+    window.setTimeout(clearGestureClasses, 220);
+  });
+}
+
+function initializeMobileSwipeToClose(root = document) {
+  root.querySelectorAll(".modal:not(.blocking)").forEach((modal) => {
+    const closeButton = modal.querySelector(".modal-close");
+    const surface = modal.querySelector(".modal-card") || modal.firstElementChild;
+    if (closeButton && surface)
+      attachMobileSwipeToClose(modal, surface, () => closeButton.click());
+  });
+
+  const groupModal = $("#groupSubscriptionModal");
+  const groupClose = $("#closeGroupSubscription");
+  if (groupModal && groupClose)
+    attachMobileSwipeToClose(groupModal, groupModal.firstElementChild, () =>
+      groupClose.click(),
+    );
+
+  const authScreen = $("#authScreen");
+  const authClose = $("#authClose");
+  if (authScreen && authClose)
+    attachMobileSwipeToClose(authScreen, authScreen.querySelector(".auth-card"), () =>
+      authClose.click(),
+    );
+
+  const queuePanel = $("#nextUpPanel");
+  if (queuePanel)
+    attachMobileSwipeToClose(queuePanel, queuePanel, () =>
+      queueDrawerClose.click(),
+    );
+}
+
+initializeMobileSwipeToClose();
 window.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && $("#nextUpPanel").classList.contains("mobile-open"))
     setMobileQueueOpen(false, true);
@@ -1076,6 +1203,7 @@ function bindAdminUi() {
   $$("#adminHubModal .modal-close, #freeUploadsModal .modal-close, #banAccountModal .modal-close").forEach(
     (button) => (button.onclick = purgeAdminUi),
   );
+  initializeMobileSwipeToClose(document);
   return true;
 }
 async function ensureAdminUi() {

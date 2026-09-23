@@ -4338,6 +4338,23 @@ button {
 }
 
 @media (max-width: 767px) {
+  .mobile-swipe-surface {
+    will-change: transform;
+  }
+  .mobile-swipe-surface.swipe-dragging {
+    transform: translateY(var(--swipe-close-y, 0)) !important;
+    transition: none !important;
+  }
+  .mobile-swipe-surface.swipe-resetting {
+    transform: translateY(0) !important;
+    transition: transform 0.2s ease-out !important;
+  }
+  .mobile-swipe-surface.swipe-dismissing {
+    transform: translateY(105dvh) !important;
+    transition: transform 0.18s ease-in !important;
+    pointer-events: none;
+  }
+
   .library-songs-list {
     max-height: min(55dvh, 560px);
     padding-right: 3px;
