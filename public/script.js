@@ -4036,7 +4036,9 @@ function updateProfile() {
   }
   $("#reportContentButton").hidden = false;
   const affiliateButton = $("#affiliateApplyButton");
-  affiliateButton.hidden = false;
+  // The application shortcut is for regular accounts. Master Admins manage
+  // applications from the dedicated queue inside the Admin Hub instead.
+  affiliateButton.hidden = user.adminMode === "master";
   affiliateButton.disabled = false;
   affiliateButton.textContent = user.isAffiliate
     ? `Affiliate · ${user.affiliateCode} · ${Number(user.referralCount || 0)}`
@@ -4095,7 +4097,11 @@ function updateGuestProfile() {
   pendingUploads = [];
   updateFreeUploadsCount();
   $("#reportContentButton").hidden = false;
-  $("#affiliateApplyButton").hidden = true;
+  // Guests may see the Affiliate entry, but openAffiliateApplication() sends
+  // them through the existing login/create-account gate before they can apply.
+  $("#affiliateApplyButton").hidden = false;
+  $("#affiliateApplyButton").disabled = false;
+  $("#affiliateApplyButton").textContent = "Affiliate";
   $("#adminBoostTools").hidden = true;
   $("#boostMilestones").hidden = true;
   finishReportMode();

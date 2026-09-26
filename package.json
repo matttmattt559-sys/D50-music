@@ -7,13 +7,14 @@
   "type": "commonjs",
   "scripts": {
     "start": "node server.js",
-    "check": "node --check server.js && node --check public/script.js"
+    "check": "node --check server.js && node --check public/script.js && node --check scripts/migrate-media-to-r2.js",
+    "migrate:r2": "node scripts/migrate-media-to-r2.js"
   },
   "engines": {
     "node": ">=18.0.0"
   },
   "dependencies": {
-    "cloudinary": "^2.7.0",
+    "@aws-sdk/client-s3": "^3.899.0",
     "express": "^5.1.0",
     "multer": "^2.0.2",
     "pg": "^8.16.3",

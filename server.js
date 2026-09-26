@@ -4,7 +4,11 @@ const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 const Stripe = require("stripe");
-const { v2: cloudinary } = require("cloudinary");
+const {
+  S3Client,
+  PutObjectCommand,
+  DeleteObjectCommand,
+} = require("@aws-sdk/client-s3");
 const { Pool } = require("pg");
 
 const app = express();
@@ -110,30 +114,48 @@ function buildStripePaymentLinkUrl(linkUrl, user) {
     return "";
   }
 }
-const CLOUDINARY_URL = String(process.env.CLOUDINARY_URL || "").trim();
-const CLOUDINARY_CLOUD_NAME = String(
-  process.env.CLOUDINARY_CLOUD_NAME || "",
+const R2_ACCOUNT_ID = String(process.env.R2_ACCOUNT_ID || "").trim();
+const R2_BUCKET_NAME = String(process.env.R2_BUCKET_NAME || "").trim();
+const R2_ACCESS_KEY_ID = String(process.env.R2_ACCESS_KEY_ID || "").trim();
+const R2_SECRET_ACCESS_KEY = String(
+  process.env.R2_SECRET_ACCESS_KEY || "",
 ).trim();
-const CLOUDINARY_API_KEY = String(
-  process.env.CLOUDINARY_API_KEY || "",
-).trim();
-const CLOUDINARY_API_SECRET = String(
-  process.env.CLOUDINARY_API_SECRET || "",
-).trim();
-const CLOUDINARY_CONFIGURED = Boolean(
-  CLOUDINARY_URL ||
-    (CLOUDINARY_CLOUD_NAME && CLOUDINARY_API_KEY && CLOUDINARY_API_SECRET),
+const R2_DEV_URL = String(process.env.R2_DEV_URL || "")
+  .trim()
+  .replace(/\/$/, "");
+const R2_PUBLIC_URL_VALID = (() => {
+  try {
+    const url = new URL(R2_DEV_URL);
+    return (
+      url.protocol === "https:" &&
+      url.hostname.endsWith(".r2.dev") &&
+      url.hostname !== "r2.dev"
+    );
+  } catch {
+    return false;
+  }
+})();
+const R2_CONFIGURED = Boolean(
+  R2_ACCOUNT_ID &&
+    R2_BUCKET_NAME &&
+    R2_ACCESS_KEY_ID &&
+    R2_SECRET_ACCESS_KEY &&
+    R2_PUBLIC_URL_VALID,
 );
-if (CLOUDINARY_CLOUD_NAME && CLOUDINARY_API_KEY && CLOUDINARY_API_SECRET) {
-  cloudinary.config({
-    cloud_name: CLOUDINARY_CLOUD_NAME,
-    api_key: CLOUDINARY_API_KEY,
-    api_secret: CLOUDINARY_API_SECRET,
-    secure: true,
-  });
-} else if (CLOUDINARY_URL) {
-  // The Cloudinary SDK reads CLOUDINARY_URL directly from the environment.
-  cloudinary.config({ secure: true });
+const r2 = R2_CONFIGURED
+  ? new S3Client({
+      region: "auto",
+      endpoint: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+      credentials: {
+        accessKeyId: R2_ACCESS_KEY_ID,
+        secretAccessKey: R2_SECRET_ACCESS_KEY,
+      },
+    })
+  : null;
+if (process.env.NODE_ENV === "production" && !R2_CONFIGURED) {
+  console.warn(
+    "R2 media storage is not ready. Uploads will be rejected until all R2 variables and the complete pub-….r2.dev URL are configured.",
+  );
 }
 const PREMIUM_CATEGORY_LIMIT = 5;
 const CATEGORY_SONG_LIMIT = 50;
@@ -1185,11 +1207,11 @@ const diskStorage = multer.diskStorage({
       `${Date.now()}-${crypto.randomUUID()}${path.extname(file.originalname).toLowerCase()}`,
     ),
 });
-// Audio is kept in memory only long enough to send it to Cloudinary. Covers
-// continue using the existing disk workflow so the current UI stays compatible.
+// Production uploads stay in memory only long enough to send them to R2.
+// Local disk storage remains available for development when R2 is not configured.
 const storage = {
   _handleFile(request, file, done) {
-    if (CLOUDINARY_CONFIGURED && file.fieldname === "song") {
+    if (R2_CONFIGURED) {
       const chunks = [];
       let size = 0;
       file.stream.on("data", (chunk) => {
@@ -1230,7 +1252,7 @@ const upload = multer({
     );
   },
 });
-const cloudinaryAudioUpload = multer({
+const r2AudioUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: AUDIO_LIMIT, files: 1, fields: 5, parts: 6 },
   fileFilter: (_request, file, done) => {
@@ -1250,19 +1272,43 @@ function isValidMp3Buffer(buffer) {
   );
 }
 
-function uploadAudioBufferToCloudinary(file, userId) {
-  return new Promise((resolve, reject) => {
-    const uploadStream = cloudinary.uploader.upload_stream(
-      {
-        resource_type: "video",
-        folder: "d50/audio",
-        public_id: `${Date.now()}-${userId}-${crypto.randomUUID()}`,
-        overwrite: false,
-      },
-      (error, result) => (error ? reject(error) : resolve(result)),
-    );
-    uploadStream.end(file.buffer);
+function r2PublicUrl(key) {
+  return `${R2_DEV_URL}/${key.split("/").map(encodeURIComponent).join("/")}`;
+}
+
+async function uploadBufferToR2(file, folder, ownerId) {
+  if (!R2_CONFIGURED || !file?.buffer)
+    throw new Error("R2 object storage is not configured.");
+  const extension = path.extname(file.originalname).toLowerCase();
+  const key = `${folder}/${Date.now()}-${ownerId}-${crypto.randomUUID()}${extension}`;
+  await r2.send(
+    new PutObjectCommand({
+      Bucket: R2_BUCKET_NAME,
+      Key: key,
+      Body: file.buffer,
+      ContentType: file.mimetype || "application/octet-stream",
+      ContentLength: file.size,
+      CacheControl: "public, max-age=31536000, immutable",
+    }),
+  );
+  return { key, url: r2PublicUrl(key), bytes: file.size };
+}
+
+async function deleteR2Object(key) {
+  if (!R2_CONFIGURED || !key) return;
+  await r2.send(
+    new DeleteObjectCommand({ Bucket: R2_BUCKET_NAME, Key: String(key) }),
+  );
+}
+
+function productionR2Unavailable(response) {
+  if (process.env.NODE_ENV !== "production" || R2_CONFIGURED) return false;
+  response.status(503).json({
+    code: "R2_NOT_CONFIGURED",
+    error:
+      "Uploads are temporarily unavailable until the complete Cloudflare R2 configuration is added in Render.",
   });
+  return true;
 }
 
 function promotionReferenceFromDiscount(discount) {
@@ -1473,7 +1519,7 @@ app.use((request, response, next) => {
   response.setHeader("Referrer-Policy", "no-referrer");
   response.setHeader(
     "Content-Security-Policy",
-    "default-src 'self'; script-src 'self' https://js.stripe.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://*.stripe.com; media-src 'self' https://res.cloudinary.com; connect-src 'self' https://api.stripe.com; frame-src https://js.stripe.com https://hooks.stripe.com; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
+    "default-src 'self'; script-src 'self' https://js.stripe.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://*.stripe.com https://*.r2.dev; media-src 'self' https://*.r2.dev; connect-src 'self' https://api.stripe.com; frame-src https://js.stripe.com https://hooks.stripe.com; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
   );
   if (
     request.path === "/" ||
@@ -1545,14 +1591,15 @@ app.get("/music/:filename", (request, response) => {
 });
 
 app.post(
-  "/api/cloudinary/audio",
+  "/api/r2/audio",
   auth,
-  cloudinaryAudioUpload.single("song"),
+  r2AudioUpload.single("song"),
   async (request, response) => {
-    if (!CLOUDINARY_CONFIGURED) {
+    if (!R2_CONFIGURED) {
       return response.status(503).json({
-        code: "CLOUDINARY_NOT_CONFIGURED",
-        error: "Cloudinary audio storage is not configured on this server.",
+        code: "R2_NOT_CONFIGURED",
+        error:
+          "R2 is not configured. Add the bucket credentials and the bucket's full pub-….r2.dev URL in Render.",
       });
     }
     if (request.user.banned) {
@@ -1572,23 +1619,17 @@ app.post(
     }
 
     try {
-      const uploaded = await uploadAudioBufferToCloudinary(
-        request.file,
-        request.user.id,
-      );
+      const uploaded = await uploadBufferToR2(request.file, "audio", request.user.id);
       return response.status(201).json({
-        url: uploaded.secure_url,
-        publicId: uploaded.public_id,
-        resourceType: uploaded.resource_type,
-        format: uploaded.format,
+        url: uploaded.url,
+        key: uploaded.key,
         bytes: uploaded.bytes,
-        duration: Number(uploaded.duration || 0),
         originalName: sanitizeText(request.file.originalname, 255),
       });
     } catch (error) {
-      console.error("Cloudinary MP3 upload failed:", error.message);
+      console.error("R2 MP3 upload failed:", error.message);
       return response.status(502).json({
-        code: "CLOUDINARY_UPLOAD_FAILED",
+        code: "R2_UPLOAD_FAILED",
         error: "The MP3 could not be uploaded. Please try again.",
       });
     }
@@ -3097,6 +3138,10 @@ app.post(
     { name: "cover", maxCount: 1 },
   ]),
   async (request, response) => {
+    if (productionR2Unavailable(response)) {
+      await removeUploadedFiles(request.files);
+      return;
+    }
     if (request.user.banned) {
       await removeUploadedFiles(request.files);
       return response.status(403).json({
@@ -3177,17 +3222,22 @@ app.post(
     const releasePendingReservation = !canPublishImmediately
       ? reserveCapacity(pendingUploadReservations, request.user.id)
       : () => {};
-    let cloudAudio = null;
-    if (CLOUDINARY_CONFIGURED) {
+    let r2Audio = null;
+    let r2Cover = null;
+    if (R2_CONFIGURED) {
       try {
-        cloudAudio = await uploadAudioBufferToCloudinary(audioFile, request.user.id);
+        r2Audio = await uploadBufferToR2(audioFile, "audio", request.user.id);
+        if (coverFile)
+          r2Cover = await uploadBufferToR2(coverFile, "covers", request.user.id);
       } catch (error) {
+        if (r2Audio?.key) await deleteR2Object(r2Audio.key).catch(() => {});
+        if (r2Cover?.key) await deleteR2Object(r2Cover.key).catch(() => {});
         await removeUploadedFiles(request.files);
         releasePendingReservation();
-        console.error("Cloudinary audio upload failed:", error.message);
+        console.error("R2 media upload failed:", error.message);
         return response.status(502).json({
-          code: "CLOUDINARY_UPLOAD_FAILED",
-          error: "The audio file could not be stored. Please try again.",
+          code: "R2_UPLOAD_FAILED",
+          error: "The song could not be stored in R2. Please try again.",
         });
       }
     }
@@ -3208,12 +3258,13 @@ app.post(
       uploaderName: request.user.email,
       categoryIds: categoryValidation.categoryIds,
       likedBy: [],
-      url: cloudAudio?.secure_url || `/music/${encodeURIComponent(audioFile.filename)}`,
-      cloudinaryPublicId: cloudAudio?.public_id || null,
-      coverFilename: coverFile?.filename || null,
-      coverUrl: coverFile
+      url: r2Audio?.url || `/music/${encodeURIComponent(audioFile.filename)}`,
+      r2AudioKey: r2Audio?.key || null,
+      coverFilename: R2_CONFIGURED ? null : coverFile?.filename || null,
+      coverUrl: r2Cover?.url || (coverFile
         ? `/covers/${encodeURIComponent(coverFile.filename)}`
-        : null,
+        : null),
+      r2CoverKey: r2Cover?.key || null,
       status: canPublishImmediately ? "approved" : "pending",
     };
     songs.push(song);
@@ -3221,10 +3272,8 @@ app.post(
       await writeSongs(songs);
     } catch (error) {
       await removeUploadedFiles(request.files);
-      if (cloudAudio?.public_id)
-        await cloudinary.uploader.destroy(cloudAudio.public_id, {
-          resource_type: "video",
-        }).catch(() => {});
+      if (r2Audio?.key) await deleteR2Object(r2Audio.key).catch(() => {});
+      if (r2Cover?.key) await deleteR2Object(r2Cover.key).catch(() => {});
       throw error;
     } finally {
       releasePendingReservation();
@@ -3243,6 +3292,10 @@ app.patch(
   upload.single("cover"),
   async (request, response) => {
     const coverFile = request.file;
+    if (productionR2Unavailable(response)) {
+      await removeUploadedFiles({ cover: coverFile ? [coverFile] : [] });
+      return;
+    }
     if (!coverFile)
       return response.status(400).json({ error: "Choose a JPG or PNG cover." });
     const songs = readSongs();
@@ -3280,16 +3333,34 @@ app.patch(
     const previousCover = song.coverFilename
       ? path.join(COVERS_DIR, path.basename(song.coverFilename))
       : null;
-    song.coverFilename = coverFile.filename;
-    song.coverUrl = `/covers/${encodeURIComponent(coverFile.filename)}`;
+    const previousR2CoverKey = song.r2CoverKey || null;
+    let uploadedCover = null;
+    if (R2_CONFIGURED) {
+      try {
+        uploadedCover = await uploadBufferToR2(coverFile, "covers", request.user.id);
+      } catch (error) {
+        return response.status(502).json({
+          code: "R2_UPLOAD_FAILED",
+          error: "The cover could not be stored in R2.",
+        });
+      }
+    }
+    song.coverFilename = R2_CONFIGURED ? null : coverFile.filename;
+    song.coverUrl = uploadedCover?.url || `/covers/${encodeURIComponent(coverFile.filename)}`;
+    song.r2CoverKey = uploadedCover?.key || null;
     try {
       await writeSongs(songs);
     } catch (error) {
       await fs.promises.unlink(coverFile.path).catch(() => {});
+      if (uploadedCover?.key) await deleteR2Object(uploadedCover.key).catch(() => {});
       throw error;
     }
     if (previousCover && previousCover !== coverFile.path)
       await fs.promises.unlink(previousCover).catch(() => {});
+    if (previousR2CoverKey && previousR2CoverKey !== uploadedCover?.key)
+      await deleteR2Object(previousR2CoverKey).catch((error) =>
+        console.error("R2 old cover delete failed:", error.message),
+      );
     response.json(publicSong(song, request.user));
   },
 );
@@ -3335,11 +3406,14 @@ app.delete("/api/songs/:id", auth, async (request, response) => {
     const safePath = path.join(MUSIC_DIR, path.basename(song.filename));
     if (fs.existsSync(safePath)) fs.unlinkSync(safePath);
   }
-  if (song.cloudinaryPublicId && CLOUDINARY_CONFIGURED) {
-    await cloudinary.uploader.destroy(song.cloudinaryPublicId, {
-      resource_type: "video",
-    }).catch((error) => console.error("Cloudinary delete failed:", error.message));
-  }
+  if (song.r2AudioKey)
+    await deleteR2Object(song.r2AudioKey).catch((error) =>
+      console.error("R2 audio delete failed:", error.message),
+    );
+  if (song.r2CoverKey)
+    await deleteR2Object(song.r2CoverKey).catch((error) =>
+      console.error("R2 cover delete failed:", error.message),
+    );
   if (song.coverFilename) {
     const safeCoverPath = path.join(
       COVERS_DIR,
@@ -3386,6 +3460,10 @@ app.post(
   upload.single("categoryCover"),
   async (request, response) => {
     const coverFile = request.file;
+    if (productionR2Unavailable(response)) {
+      await removeUploadedFiles({ categoryCover: coverFile ? [coverFile] : [] });
+      return;
+    }
     const name = sanitizeText(request.body.name, 50);
     if (!name) {
       if (coverFile) await fs.promises.unlink(coverFile.path).catch(() => {});
@@ -3421,21 +3499,38 @@ app.post(
         });
       }
     }
+    let r2Cover = null;
+    if (coverFile && R2_CONFIGURED) {
+      try {
+        r2Cover = await uploadBufferToR2(
+          coverFile,
+          "category-covers",
+          request.user.id,
+        );
+      } catch (error) {
+        return response.status(502).json({
+          code: "R2_UPLOAD_FAILED",
+          error: "The category cover could not be stored in R2.",
+        });
+      }
+    }
     const category = {
       id: crypto.randomUUID(),
       name,
       ownerId: request.user.id,
       likedBy: [],
-      coverFilename: coverFile?.filename || null,
-      coverUrl: coverFile
+      coverFilename: R2_CONFIGURED ? null : coverFile?.filename || null,
+      coverUrl: r2Cover?.url || (coverFile
         ? `/category-covers/${encodeURIComponent(coverFile.filename)}`
-        : null,
+        : null),
+      r2CoverKey: r2Cover?.key || null,
     };
     items.push(category);
     try {
       await writeCategories(items);
     } catch (error) {
       if (coverFile) await fs.promises.unlink(coverFile.path).catch(() => {});
+      if (r2Cover?.key) await deleteR2Object(r2Cover.key).catch(() => {});
       throw error;
     }
     response.status(201).json(publicCategory(category, request.user));
@@ -3448,6 +3543,10 @@ app.patch(
   upload.single("categoryCover"),
   async (request, response) => {
     const coverFile = request.file;
+    if (productionR2Unavailable(response)) {
+      await removeUploadedFiles({ categoryCover: coverFile ? [coverFile] : [] });
+      return;
+    }
     if (!coverFile)
       return response.status(400).json({ error: "Choose a JPG or PNG cover." });
     const categories = readCategories();
@@ -3483,16 +3582,38 @@ app.patch(
     const previousCover = category.coverFilename
       ? path.join(CATEGORY_COVERS_DIR, path.basename(category.coverFilename))
       : null;
-    category.coverFilename = coverFile.filename;
-    category.coverUrl = `/category-covers/${encodeURIComponent(coverFile.filename)}`;
+    const previousR2CoverKey = category.r2CoverKey || null;
+    let uploadedCover = null;
+    if (R2_CONFIGURED) {
+      try {
+        uploadedCover = await uploadBufferToR2(
+          coverFile,
+          "category-covers",
+          request.user.id,
+        );
+      } catch (error) {
+        return response.status(502).json({
+          code: "R2_UPLOAD_FAILED",
+          error: "The category cover could not be stored in R2.",
+        });
+      }
+    }
+    category.coverFilename = R2_CONFIGURED ? null : coverFile.filename;
+    category.coverUrl = uploadedCover?.url || `/category-covers/${encodeURIComponent(coverFile.filename)}`;
+    category.r2CoverKey = uploadedCover?.key || null;
     try {
       await writeCategories(categories);
     } catch (error) {
       await fs.promises.unlink(coverFile.path).catch(() => {});
+      if (uploadedCover?.key) await deleteR2Object(uploadedCover.key).catch(() => {});
       throw error;
     }
     if (previousCover && previousCover !== coverFile.path)
       await fs.promises.unlink(previousCover).catch(() => {});
+    if (previousR2CoverKey && previousR2CoverKey !== uploadedCover?.key)
+      await deleteR2Object(previousR2CoverKey).catch((error) =>
+        console.error("R2 old category cover delete failed:", error.message),
+      );
     response.json(publicCategory(category, request.user));
   },
 );
@@ -3550,6 +3671,10 @@ app.delete("/api/categories/:id", auth, async (request, response) => {
     );
     await fs.promises.unlink(safeCoverPath).catch(() => {});
   }
+  if (category.r2CoverKey)
+    await deleteR2Object(category.r2CoverKey).catch((error) =>
+      console.error("R2 category cover delete failed:", error.message),
+    );
   const songs = readSongs();
   songs.forEach((song) => {
     song.categoryIds = (song.categoryIds || []).filter(
