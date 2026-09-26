@@ -1635,11 +1635,58 @@ header input {
 .header-upgrade,
 .admin-hub-button,
 .free-uploads-button,
+.affiliate-apply-button,
 .report-content-button {
   border: 1px solid #5ee7ff22;
   background: #174e5c;
   border-radius: 12px;
   color: #bdf8ff;
+}
+.affiliate-apply-button {
+  padding: 8px 12px;
+  border-color: #b58cff66;
+  color: #efe5ff;
+  background: #35205c;
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+.affiliate-apply-button:hover {
+  border-color: #c9aaff;
+  filter: brightness(1.15);
+}
+.affiliate-application-card {
+  width: min(560px, 100%);
+  text-align: left;
+}
+.affiliate-application-card > h1,
+.affiliate-application-card > p,
+.affiliate-application-card > .eye {
+  text-align: center;
+}
+.affiliate-application-card form {
+  display: grid;
+  gap: 12px;
+  margin-top: 22px;
+}
+.affiliate-application-card label {
+  display: grid;
+  gap: 7px;
+  color: #d8cfdf;
+  font-size: 12px;
+  font-weight: 800;
+}
+.affiliate-application-card input,
+.affiliate-application-card select,
+.affiliate-application-card textarea {
+  width: 100%;
+  padding: 12px 13px;
+  border: 1px solid #ffffff20;
+  border-radius: 10px;
+  outline: none;
+  color: white;
+  background: #090711;
+  resize: vertical;
 }
 .free-uploads-button {
   order: -1;
@@ -1668,13 +1715,57 @@ header input {
   font-size: 12px;
 }
 .report-content-button {
-  padding: 13px 18px;
+  min-height: 34px;
+  padding: 7px 12px;
   border-color: #8870ff77;
   color: white;
   background: linear-gradient(100deg, #7651ec, #269dc2);
   font-weight: 800;
+  font-size: 12px;
   white-space: nowrap;
   box-shadow: 0 8px 24px #5133b533;
+}
+.report-submit-card {
+  width: min(560px, 100%);
+  text-align: left;
+}
+.report-submit-card > h1,
+.report-submit-card > p,
+.report-submit-card > .eye {
+  text-align: center;
+}
+.report-submit-card form {
+  display: grid;
+  gap: 9px;
+  margin-top: 22px;
+}
+.report-submit-card label {
+  color: #d8cfdf;
+  font-size: 12px;
+  font-weight: 800;
+}
+.report-submit-card select,
+.report-submit-card textarea {
+  width: 100%;
+  padding: 12px 13px;
+  border: 1px solid #ffffff20;
+  border-radius: 10px;
+  outline: none;
+  color: white;
+  background: #090711;
+  resize: vertical;
+}
+.report-submit-card select:focus,
+.report-submit-card textarea:focus {
+  border-color: #5ee7ff88;
+  box-shadow: 0 0 0 3px #5ee7ff12;
+}
+.report-submit-card .primary-button:disabled {
+  cursor: not-allowed;
+  color: #aaa4b3;
+  background: #3a3642;
+  box-shadow: none;
+  opacity: 0.65;
 }
 .report-content-button:hover {
   transform: translateY(-1px);
@@ -2111,6 +2202,113 @@ body.report-mode-active .report-mode-badge button {
   margin-top: 18px;
   padding-top: 16px;
   border-top: 1px solid var(--line);
+}
+.free-user-report-section {
+  margin: 18px 0;
+  padding: 16px;
+  border: 1px solid #5ee7ff2e;
+  border-radius: 14px;
+  background: #07141d80;
+}
+.affiliate-applications-section {
+  margin: 18px 0;
+  padding: 16px;
+  border: 1px solid #b58cff33;
+  border-radius: 14px;
+  background: #160d2680;
+}
+.affiliate-applications-section > h2 {
+  margin: 4px 0 12px;
+}
+.affiliate-applications-panel {
+  max-height: min(34vh, 340px);
+}
+.affiliate-application-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+.affiliate-application-row > div:first-child {
+  min-width: 0;
+}
+.affiliate-application-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+}
+.affiliate-application-actions button {
+  padding: 8px 10px;
+  border: 1px solid #ffffff26;
+  border-radius: 8px;
+  color: white;
+  background: #21172f;
+  font-size: 12px;
+  font-weight: 800;
+}
+.affiliate-application-actions .approve-affiliate {
+  border-color: #5ee7ff55;
+  color: #bcf7ff;
+  background: #102b35;
+}
+.affiliate-application-actions .reject-affiliate {
+  border-color: #ff668855;
+  color: #ffacbd;
+  background: #32131d;
+}
+.free-user-reports-panel {
+  display: block;
+  max-height: min(34vh, 330px);
+  overflow: auto;
+}
+.free-report-grid {
+  display: grid;
+  grid-template-columns: minmax(130px, 1fr) minmax(180px, 1.5fr) minmax(160px, 1.1fr) minmax(190px, auto);
+  min-width: 760px;
+  align-items: center;
+  gap: 10px;
+}
+.free-report-grid-heading {
+  position: sticky;
+  z-index: 1;
+  top: 0;
+  padding: 9px 11px;
+  color: #9ef3ff;
+  background: #0b0a14;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.free-report-grid-row {
+  padding: 10px 11px;
+  border-top: 1px solid #ffffff12;
+  color: #ddd6e8;
+  background: #ffffff05;
+  font-size: 12px;
+}
+.free-report-grid-row > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.free-report-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+.free-report-actions button {
+  padding: 7px 9px;
+  border: 1px solid #5ee7ff44;
+  border-radius: 8px;
+  color: #baf7ff;
+  background: #102432;
+  font-size: 11px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+.free-report-actions .delete-reported-song {
+  border-color: #ff506d66;
+  color: #ffacba;
+  background: #32131c;
 }
 .admin-hub-panel {
   display: grid;

@@ -13,7 +13,7 @@
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" href="/icons/d50-icon-192.png" sizes="192x192" />
     <link rel="apple-touch-icon" href="/icons/d50-icon-180.png" sizes="180x180" />
-    <link rel="stylesheet" href="style.css?v=20260923-single-audio-12" />
+    <link rel="stylesheet" href="style.css?v=20260927-affiliate-system-14" />
     <link rel="stylesheet" href="group-subscription.css?v=20260920-1" />
   </head>
   <body class="dashboard-active main-app-container">
@@ -164,9 +164,11 @@
             id="reportContentButton"
             class="report-content-button hidden md:flex"
             type="button"
-            hidden
           >
-            Report Content
+            Report
+          </button>
+          <button id="affiliateApplyButton" class="affiliate-apply-button" type="button" hidden>
+            Affiliate
           </button>
           <button
             id="adminHubButton"
@@ -562,6 +564,49 @@
       <span id="boostModeText">Select a song or category to boost…</span>
       <button id="cancelBoostMode" type="button">Cancel</button>
     </div>
+    <div id="reportSubmitModal" class="modal" hidden>
+      <div class="modal-card report-submit-card" role="dialog" aria-modal="true" aria-labelledby="reportSubmitTitle">
+        <button class="modal-close" type="button" aria-label="Close report form">×</button>
+        <p class="eye">REPORT CONTENT</p>
+        <h1 id="reportSubmitTitle">Report a song</h1>
+        <p>Select the track and tell the moderation team what is wrong.</p>
+        <form id="reportSubmitForm">
+          <label for="reportSongSelect">Song</label>
+          <select id="reportSongSelect" required>
+            <option value="">Select a song…</option>
+          </select>
+          <label for="reportReasonInput">Why are you reporting this song?</label>
+          <textarea id="reportReasonInput" maxlength="500" rows="5" placeholder="Write a clear reason…" required></textarea>
+          <button id="sendReportButton" class="primary-button" type="submit" disabled>Send Report</button>
+        </form>
+        <p id="reportSubmitMessage" class="form-message" aria-live="polite"></p>
+      </div>
+    </div>
+    <div id="affiliateApplicationModal" class="modal" hidden>
+      <div class="modal-card affiliate-application-card" role="dialog" aria-modal="true" aria-labelledby="affiliateApplicationTitle">
+        <button class="modal-close" type="button" aria-label="Close affiliate application">×</button>
+        <p class="eye">D50 PARTNER PROGRAM</p>
+        <h1 id="affiliateApplicationTitle">Become an affiliate</h1>
+        <p>Tell us where you create content and why you want to promote D50 Music.</p>
+        <form id="affiliateApplicationForm">
+          <label>Channel name<input id="affiliateChannelName" maxlength="100" required /></label>
+          <label>Channel type
+            <select id="affiliateChannelType" required>
+              <option value="">Choose a platform…</option>
+              <option value="youtube">YouTube</option>
+              <option value="tiktok">TikTok</option>
+              <option value="instagram">Instagram</option>
+              <option value="twitch">Twitch</option>
+              <option value="podcast">Podcast</option>
+              <option value="other">Other</option>
+            </select>
+          </label>
+          <label>Why do you want to join?<textarea id="affiliateReason" maxlength="500" rows="5" required></textarea></label>
+          <button class="primary-button" type="submit">Submit Application</button>
+        </form>
+        <p id="affiliateApplicationMessage" class="form-message" aria-live="polite"></p>
+      </div>
+    </div>
     <div id="reportConfirmationModal" class="modal" hidden>
       <div class="modal-card report-confirmation-card">
         <button
@@ -618,6 +663,6 @@
       </div>
     </div>
     <script src="pwa.js?v=20260921-pwa-1"></script>
-    <script src="script.js?v=20260923-single-audio-12"></script>
+    <script src="script.js?v=20260927-affiliate-system-14"></script>
   </body>
 </html>

@@ -3015,8 +3015,83 @@ $("#adminPinForm").onsubmit = async (event) => {
 function renderAdminReports(reports) {
   const activePanel = $("#activeReportsPanel");
   const savedPanel = $("#savedReportsPanel");
+  const freePanel = $("#freeUserReportsPanel");
   activePanel.innerHTML = "";
   savedPanel.innerHTML = "";
+  freePanel.innerHTML = "";
+  const freeReports = reports.filter(
+    (report) => report.queueType === "free_user_active",
+  );
+  if (!freeReports.length) {
+    freePanel.innerHTML =
+      '<p class="admin-hub-empty">No active free-user or guest reports.</p>';
+  } else {
+    const heading = document.createElement("div");
+    heading.className = "free-report-grid free-report-grid-heading";
+    ["Reported Song Title", "Reason Provided", "Sender Username or IP Address", "Actions"].forEach(
+      (label) => {
+        const cell = document.createElement("b");
+        cell.textContent = label;
+        heading.append(cell);
+      },
+    );
+    freePanel.append(heading);
+    freeReports.forEach((report) => {
+      const row = document.createElement("article");
+      row.className = "free-report-grid free-report-grid-row";
+      const title = document.createElement("span");
+      title.textContent = report.itemName || "Unknown song";
+      const reason = document.createElement("span");
+      reason.textContent = report.reason || report.message || "No reason provided";
+      const sender = document.createElement("span");
+      sender.textContent =
+        report.senderDisplay ||
+        report.reporterEmail ||
+        report.reporterIp ||
+        "Unknown guest";
+      const actions = document.createElement("div");
+      actions.className = "free-report-actions";
+      const deleteSong = document.createElement("button");
+      deleteSong.type = "button";
+      deleteSong.className = "delete-reported-song";
+      deleteSong.textContent = "Delete Song";
+      deleteSong.onclick = async () => {
+        if (!confirm(`Delete “${report.itemName || "this song"}” permanently?`))
+          return;
+        deleteSong.disabled = true;
+        const deleteResponse = await apiFetch(
+          `/api/songs/${encodeURIComponent(report.songId || report.itemId)}`,
+          {
+            method: "DELETE",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              reason: report.reason || "Removed after content report review.",
+            }),
+          },
+        );
+        if (!deleteResponse.ok && deleteResponse.status !== 404) {
+          deleteSong.disabled = false;
+          return handleLocked(deleteResponse);
+        }
+        await apiFetch(`/api/reports/${report.id}`, { method: "DELETE" });
+        await Promise.all([loadAdminHub(), load()]);
+      };
+      const dismiss = document.createElement("button");
+      dismiss.type = "button";
+      dismiss.className = "dismiss-report";
+      dismiss.textContent = "Dismiss Report";
+      dismiss.onclick = async () => {
+        const response = await apiFetch(`/api/reports/${report.id}`, {
+          method: "DELETE",
+        });
+        if (!response.ok) return handleLocked(response);
+        await loadAdminHub();
+      };
+      actions.append(deleteSong, dismiss);
+      row.append(title, reason, sender, actions);
+      freePanel.append(row);
+    });
+  }
   const appendReports = (items, panel, emptyMessage) => {
     if (!items.length) {
       panel.innerHTML = `<p class="admin-hub-empty">${emptyMessage}</p>`;
@@ -3092,12 +3167,18 @@ function renderAdminReports(reports) {
     });
   };
   appendReports(
-    reports.filter((report) => !report.remembered),
+    reports.filter(
+      (report) =>
+        report.queueType !== "free_user_active" && !report.remembered,
+    ),
     activePanel,
     "No active reports.",
   );
   appendReports(
-    reports.filter((report) => report.remembered),
+    reports.filter(
+      (report) =>
+        report.queueType !== "free_user_active" && report.remembered,
+    ),
     savedPanel,
     "No saved reports yet.",
   );
@@ -3299,6 +3380,70 @@ function renderPremiumCodes(codes) {
   }
 }
 
+function renderAffiliateApplications(applications) {
+  const panel = $("#affiliateApplicationsPanel");
+  panel.replaceChildren();
+  if (!applications.length) {
+    panel.innerHTML =
+      '<p class="admin-hub-empty">No pending affiliate applications.</p>';
+    return;
+  }
+  applications.forEach((application) => {
+    const row = document.createElement("article");
+    row.className = "admin-hub-item affiliate-application-row";
+    const details = document.createElement("div");
+    const heading = document.createElement("b");
+    heading.textContent = `${application.channelName} · ${application.channelType}`;
+    const email = document.createElement("small");
+    email.textContent = application.email;
+    const reason = document.createElement("p");
+    reason.textContent = application.reason;
+    details.append(heading, email, reason);
+    const actions = document.createElement("div");
+    actions.className = "affiliate-application-actions";
+    const approve = document.createElement("button");
+    approve.type = "button";
+    approve.className = "approve-affiliate";
+    approve.textContent = "Approve & Create Code";
+    approve.onclick = async () => {
+      approve.disabled = true;
+      const response = await apiFetch("/api/admin/affiliate/approve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId: application.userId }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        approve.disabled = false;
+        return alert(data.error || "The affiliate could not be approved.");
+      }
+      alert(`Affiliate approved. Promotion Code: ${data.affiliateCode}`);
+      await loadAdminHub();
+    };
+    const reject = document.createElement("button");
+    reject.type = "button";
+    reject.className = "reject-affiliate";
+    reject.textContent = "Reject";
+    reject.onclick = async () => {
+      if (!confirm(`Reject ${application.email}'s affiliate application?`)) return;
+      reject.disabled = true;
+      const response = await apiFetch("/api/admin/affiliate/reject", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId: application.userId }),
+      });
+      if (!response.ok) {
+        reject.disabled = false;
+        return handleLocked(response);
+      }
+      await loadAdminHub();
+    };
+    actions.append(approve, reject);
+    row.append(details, actions);
+    panel.append(row);
+  });
+}
+
 async function handlePremiumCodeSubmit(event) {
   event.preventDefault();
   if (user?.adminMode !== "master") return;
@@ -3372,17 +3517,19 @@ async function handleBanAccountSubmit(event) {
 async function loadAdminHub() {
   if (user?.adminMode !== "master") return;
   $("#adminHubMessage").textContent = "Loading…";
-  const [reportsResponse, bansResponse, codesResponse, premiumCodesResponse] = await Promise.all([
+  const [reportsResponse, bansResponse, codesResponse, premiumCodesResponse, affiliateResponse] = await Promise.all([
     apiFetch("/api/reports", { cache: "no-store" }),
     apiFetch("/api/admin/reports-bans", { cache: "no-store" }),
     apiFetch("/api/admin/access-codes", { cache: "no-store" }),
     apiFetch("/api/admin/premium-codes", { cache: "no-store" }),
+    apiFetch("/api/admin/affiliate/applications", { cache: "no-store" }),
   ]);
-  const [reports, bansData, codes, premiumCodes] = await Promise.all([
+  const [reports, bansData, codes, premiumCodes, affiliateApplications] = await Promise.all([
     reportsResponse.json().catch(() => []),
     bansResponse.json().catch(() => ({})),
     codesResponse.json().catch(() => []),
     premiumCodesResponse.json().catch(() => []),
+    affiliateResponse.json().catch(() => []),
   ]);
   if (user?.adminMode !== "master" || !$("#adminHubModal")) return;
   if (
@@ -3390,6 +3537,7 @@ async function loadAdminHub() {
     !bansResponse.ok ||
     !codesResponse.ok ||
     !premiumCodesResponse.ok
+    || !affiliateResponse.ok
   ) {
     $("#adminHubMessage").textContent =
       bansData.error || "Admin data could not be loaded.";
@@ -3400,6 +3548,9 @@ async function loadAdminHub() {
   renderAdminBlockedUsers(bansData.adminBlockedUsers || []);
   renderAdminAccessCodes(Array.isArray(codes) ? codes : []);
   renderPremiumCodes(Array.isArray(premiumCodes) ? premiumCodes : []);
+  renderAffiliateApplications(
+    Array.isArray(affiliateApplications) ? affiliateApplications : [],
+  );
   if (managerAccountFilter?.id) {
     const selectedBan = (bansData.bannedUsers || []).find(
       (account) => account.id === managerAccountFilter.id,
@@ -3628,15 +3779,76 @@ $("#freeUploadsButton").onclick = async () => {
 function handlePendingPreviewEnded() {
   stopPendingPreview();
 }
+function openAffiliateApplication() {
+  if (!user) return showAccountGate();
+  if (user.isAffiliate) {
+    alert(
+      `Your affiliate code is ${user.affiliateCode}. Referrals: ${Number(user.referralCount || 0)}.`,
+    );
+    return;
+  }
+  const application = user.affiliateApplication || {};
+  if (application.hasApplied && application.status === "pending") {
+    alert("Your affiliate application is pending Master Admin review.");
+    return;
+  }
+  hideModals();
+  $("#affiliateChannelName").value = application.channelName || "";
+  $("#affiliateChannelType").value = application.channelType || "";
+  $("#affiliateReason").value = application.reason || "";
+  $("#affiliateApplicationMessage").textContent =
+    application.status === "rejected"
+      ? "Your previous application was rejected. You may submit an updated application."
+      : "";
+  $("#affiliateApplicationModal").hidden = false;
+  $("#affiliateChannelName").focus();
+}
+$("#affiliateApplyButton").onclick = openAffiliateApplication;
+$("#affiliateApplicationForm").onsubmit = async (event) => {
+  event.preventDefault();
+  const submit = event.currentTarget.querySelector('button[type="submit"]');
+  submit.disabled = true;
+  $("#affiliateApplicationMessage").textContent = "Submitting application…";
+  try {
+    const response = await apiFetch("/api/affiliate/apply", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        channelName: $("#affiliateChannelName").value,
+        channelType: $("#affiliateChannelType").value,
+        reason: $("#affiliateReason").value,
+      }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      $("#affiliateApplicationMessage").textContent =
+        data.error || "The application could not be submitted.";
+      return;
+    }
+    user = data;
+    $("#affiliateApplicationModal").hidden = true;
+    updateProfile();
+    alert("Your affiliate application was submitted for review.");
+  } finally {
+    submit.disabled = false;
+  }
+};
 let reportModeActive = false;
 let reportSelectionLocked = false;
 function startReportMode() {
-  if (!user?.paid || user.adminMode === "master") return;
   hideModals();
-  reportModeActive = true;
-  reportSelectionLocked = false;
-  document.body.classList.add("report-mode-active");
-  $("#reportModeBadge").hidden = false;
+  const select = $("#reportSongSelect");
+  select.replaceChildren(new Option("Select a song…", ""));
+  [...songs]
+    .sort((left, right) => String(left.title).localeCompare(String(right.title)))
+    .forEach((song) =>
+      select.append(new Option(song.title || "Untitled track", song.id)),
+    );
+  $("#reportReasonInput").value = "";
+  $("#reportSubmitMessage").textContent = "";
+  $("#sendReportButton").disabled = true;
+  $("#reportSubmitModal").hidden = false;
+  select.focus();
 }
 function finishReportMode() {
   reportModeActive = false;
@@ -3644,64 +3856,57 @@ function finishReportMode() {
   document.body.classList.remove("report-mode-active");
   const badge = $("#reportModeBadge");
   if (badge) badge.hidden = true;
-  const modal = $("#reportConfirmationModal");
-  if (modal) modal.hidden = true;
+  $("#reportSubmitModal").hidden = true;
+  $("#reportConfirmationModal").hidden = true;
 }
-async function submitSelectedReport(target) {
-  const reasonInput = prompt("Why are you reporting this content?", "");
-  if (reasonInput === null) return;
-  const reason = cleanText(reasonInput, 500);
-  if (!reason) return alert("Please enter a reason for the report.");
-  const item = {
-    itemId: target.dataset.reportId,
-    itemName: target.dataset.reportName,
-    itemType: target.dataset.reportType,
-    reason,
-    reporterEmail: user?.email || "",
-  };
-  reportSelectionLocked = true;
-  $("#reportModeBadge").firstChild.textContent = "Sending report… ";
+function updateReportSubmitState() {
+  const hasSong = Boolean($("#reportSongSelect").value);
+  const hasReason = Boolean($("#reportReasonInput").value.trim());
+  $("#sendReportButton").disabled = !hasSong || !hasReason;
+}
+$("#reportSongSelect").addEventListener("change", updateReportSubmitState);
+$("#reportReasonInput").addEventListener("input", updateReportSubmitState);
+$("#reportSubmitForm").onsubmit = async (event) => {
+  event.preventDefault();
+  const itemId = $("#reportSongSelect").value;
+  const reason = cleanText($("#reportReasonInput").value, 500);
+  if (!itemId || !reason) {
+    updateReportSubmitState();
+    $("#reportSubmitMessage").textContent =
+      !itemId ? "Select a song to report." : "A written reason is required.";
+    return;
+  }
+  const button = $("#sendReportButton");
+  button.disabled = true;
+  $("#reportSubmitMessage").textContent = "Sending report…";
   try {
-    const response = await apiFetch("/api/reports", {
+    const response = await apiFetch("/api/reports/submit", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(item),
+      body: JSON.stringify({ itemId, reason }),
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
-      reportSelectionLocked = false;
-      $("#reportModeBadge").firstChild.textContent =
-        "Click on any song card, category card, or image cover to report it… ";
-      if (data.code === "PAID_REQUIRED") return showPremium(true);
-      return alert(data.error || "The report could not be submitted.");
+      $("#reportSubmitMessage").textContent =
+        data.error || "The report could not be submitted.";
+      updateReportSubmitState();
+      return;
     }
+    $("#reportSubmitModal").hidden = true;
     $("#reportConfirmationText").textContent =
-      `You reported the ${item.itemType} “${item.itemName}”. It is now visible to the Master Admin.`;
+      `You reported the song “${data.itemName || "Selected song"}”. It is now visible to the Master Admin.`;
     $("#reportConfirmationModal").hidden = false;
     $("#reportConfirmationDone").focus();
   } catch {
-    reportSelectionLocked = false;
-    $("#reportModeBadge").firstChild.textContent =
-      "Click on any song card, category card, or image cover to report it… ";
-    alert("The report could not be sent. Your music will keep playing.");
+    $("#reportSubmitMessage").textContent =
+      "The report could not be sent. Your music will keep playing.";
+    updateReportSubmitState();
   }
-}
+};
 $("#reportContentButton").onclick = startReportMode;
 $("#cancelReportMode").onclick = finishReportMode;
 $("#reportConfirmationClose").onclick = finishReportMode;
 $("#reportConfirmationDone").onclick = finishReportMode;
-document.addEventListener(
-  "click",
-  (event) => {
-    if (!reportModeActive || reportSelectionLocked) return;
-    const target = event.target.closest("[data-report-id]");
-    if (!target) return;
-    event.preventDefault();
-    event.stopImmediatePropagation();
-    submitSelectedReport(target);
-  },
-  true,
-);
 function finishBoostMode() {
   adminBoostMode = null;
   document.body.classList.remove("boost-mode-active", "gold", "silver");
@@ -3829,8 +4034,15 @@ function updateProfile() {
     updateFreeUploadsCount();
     purgeAdminUi();
   }
-  $("#reportContentButton").hidden =
-    !user.paid || user.adminMode === "master";
+  $("#reportContentButton").hidden = false;
+  const affiliateButton = $("#affiliateApplyButton");
+  affiliateButton.hidden = false;
+  affiliateButton.disabled = false;
+  affiliateButton.textContent = user.isAffiliate
+    ? `Affiliate · ${user.affiliateCode} · ${Number(user.referralCount || 0)}`
+    : user.affiliateApplication?.status === "pending"
+      ? "Affiliate Pending"
+      : "Affiliate";
   $("#adminBoostTools").hidden = user.adminMode !== "master";
   if (user.adminMode === "master") finishReportMode();
   if (user.adminMode !== "master") finishBoostMode();
@@ -3882,7 +4094,8 @@ function updateGuestProfile() {
   $("#freeUploadsButton").hidden = true;
   pendingUploads = [];
   updateFreeUploadsCount();
-  $("#reportContentButton").hidden = true;
+  $("#reportContentButton").hidden = false;
+  $("#affiliateApplyButton").hidden = true;
   $("#adminBoostTools").hidden = true;
   $("#boostMilestones").hidden = true;
   finishReportMode();

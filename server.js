@@ -8,6 +8,7 @@ const { v2: cloudinary } = require("cloudinary");
 const { Pool } = require("pg");
 
 const app = express();
+app.set("trust proxy", 1);
 const PORT = Number(process.env.PORT || 5050);
 const ROOT = __dirname;
 
@@ -81,6 +82,9 @@ const STRIPE_DUO_LINK_URL = String(
 ).trim();
 const STRIPE_DUO_LINK_ID = String(
   process.env.STRIPE_DUO_LINK_ID || "",
+).trim();
+const STRIPE_AFFILIATE_COUPON_ID = String(
+  process.env.STRIPE_AFFILIATE_COUPON_ID || "",
 ).trim();
 const APP_BASE_URL = String(process.env.APP_BASE_URL || "")
   .trim()
@@ -216,7 +220,9 @@ async function persistRelationalRows(file, value) {
       await client.query(
         `INSERT INTO users (
            id, email, password_hash, password_salt, session_token_hash,
-           role, is_admin, is_slot_member, premium_source, data, created_at, updated_at
+           role, is_admin, is_slot_member, premium_source,
+           is_affiliate, affiliate_code, referral_count,
+           data, created_at, updated_at
          )
          SELECT
            item->>'id', LOWER(item->>'email'), item->>'passwordHash',
@@ -224,7 +230,11 @@ async function persistRelationalRows(file, value) {
            COALESCE(item->>'role', 'user'),
            COALESCE((item->>'isAdmin')::boolean, false),
            COALESCE((item->>'isSlotMember')::boolean, false),
-           NULLIF(item->>'premiumSource', ''), item,
+           NULLIF(item->>'premiumSource', ''),
+           COALESCE((item->>'isAffiliate')::boolean, false),
+           NULLIF(item->>'affiliateCode', ''),
+           COALESCE((item->>'referralCount')::integer, 0),
+           item,
            COALESCE((item->>'createdAt')::bigint, 0), NOW()
          FROM jsonb_array_elements($1::jsonb) AS item
          WHERE COALESCE(item->>'id', '') <> ''
@@ -238,6 +248,9 @@ async function persistRelationalRows(file, value) {
            is_admin = EXCLUDED.is_admin,
            is_slot_member = EXCLUDED.is_slot_member,
            premium_source = EXCLUDED.premium_source,
+           is_affiliate = EXCLUDED.is_affiliate,
+           affiliate_code = EXCLUDED.affiliate_code,
+           referral_count = EXCLUDED.referral_count,
            data = EXCLUDED.data,
            created_at = EXCLUDED.created_at,
            updated_at = NOW()`,
@@ -465,6 +478,9 @@ async function initializePostgresSchema() {
     is_admin BOOLEAN NOT NULL DEFAULT FALSE,
     is_slot_member BOOLEAN NOT NULL DEFAULT FALSE,
     premium_source TEXT,
+    is_affiliate BOOLEAN NOT NULL DEFAULT FALSE,
+    affiliate_code TEXT,
+    referral_count INTEGER NOT NULL DEFAULT 0,
     data JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at BIGINT NOT NULL DEFAULT 0,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -477,6 +493,15 @@ async function initializePostgresSchema() {
   );
   await postgres.query(
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS premium_source TEXT",
+  );
+  await postgres.query(
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_affiliate BOOLEAN NOT NULL DEFAULT FALSE",
+  );
+  await postgres.query(
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS affiliate_code TEXT",
+  );
+  await postgres.query(
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_count INTEGER NOT NULL DEFAULT 0",
   );
   await postgres.query(`CREATE TABLE IF NOT EXISTS songs (
     id TEXT PRIMARY KEY,
@@ -507,6 +532,9 @@ async function initializePostgresSchema() {
     "CREATE UNIQUE INDEX IF NOT EXISTS users_email_lower_idx ON users (LOWER(email))",
   );
   await postgres.query(
+    "CREATE UNIQUE INDEX IF NOT EXISTS users_affiliate_code_upper_idx ON users (UPPER(affiliate_code)) WHERE affiliate_code IS NOT NULL",
+  );
+  await postgres.query(
     "CREATE INDEX IF NOT EXISTS songs_status_created_idx ON songs (status, created_at DESC)",
   );
   await postgres.query(
@@ -527,7 +555,10 @@ const storageReady = DATABASE_PROVIDER === "postgres"
                    'role', role,
                    'isAdmin', is_admin,
                    'isSlotMember', is_slot_member,
-                   'premiumSource', premium_source
+                   'premiumSource', premium_source,
+                   'isAffiliate', is_affiliate,
+                   'affiliateCode', affiliate_code,
+                   'referralCount', referral_count
                  ) AS data
                  FROM users
                  ORDER BY created_at ASC`
@@ -879,6 +910,7 @@ function canPurchaseExtraSlots(user) {
   );
 }
 function publicUser(user) {
+  const application = user.affiliateApplication || {};
   return {
     id: user.id,
     email: user.email,
@@ -892,6 +924,18 @@ function publicUser(user) {
     adminFailedAttempts: Number(user.adminFailedAttempts || 0),
     adminLockedUntil: Number(user.adminLockedUntil || 0) || null,
     isAdminBanned: Boolean(user.isAdminBanned),
+    isAffiliate: Boolean(user.isAffiliate),
+    affiliateCode: user.affiliateCode || null,
+    referralCount: Number(user.referralCount || 0),
+    affiliateApplication: {
+      hasApplied: Boolean(application.hasApplied),
+      status: ["pending", "approved", "rejected"].includes(application.status)
+        ? application.status
+        : "pending",
+      channelName: application.channelName || "",
+      channelType: application.channelType || "",
+      reason: application.reason || "",
+    },
     createdAt: user.createdAt,
     likedSongIds: user.likedSongIds || [],
     adminFeatures: Number(user.adminFeatures || 0),
@@ -1221,6 +1265,75 @@ function uploadAudioBufferToCloudinary(file, userId) {
   });
 }
 
+function promotionReferenceFromDiscount(discount) {
+  return (
+    discount?.promotion_code ||
+    discount?.discount?.promotion_code ||
+    discount?.discount?.source?.promotion_code ||
+    null
+  );
+}
+
+async function appliedPromotionCodesForSession(session) {
+  let hydrated = session;
+  try {
+    hydrated = await stripe.checkout.sessions.retrieve(session.id, {
+      expand: ["discounts.discount.promotion_code"],
+    });
+  } catch (error) {
+    console.error(
+      `Stripe discount expansion failed for ${session.id}: ${error.message}`,
+    );
+  }
+  const discounts = [
+    ...(Array.isArray(hydrated.discounts) ? hydrated.discounts : []),
+    ...(Array.isArray(hydrated.total_details?.breakdown?.discounts)
+      ? hydrated.total_details.breakdown.discounts
+      : []),
+  ];
+  const promotionCodes = [];
+  for (const discount of discounts) {
+    const reference = promotionReferenceFromDiscount(discount);
+    if (!reference) continue;
+    if (typeof reference === "object") {
+      promotionCodes.push(reference);
+      continue;
+    }
+    try {
+      promotionCodes.push(await stripe.promotionCodes.retrieve(reference));
+    } catch (error) {
+      console.error(
+        `Stripe Promotion Code ${reference} could not be retrieved: ${error.message}`,
+      );
+    }
+  }
+  return promotionCodes;
+}
+
+async function recordAffiliateReferral(session, users) {
+  const promotionCodes = await appliedPromotionCodesForSession(session);
+  for (const promotionCode of promotionCodes) {
+    const code = String(promotionCode.code || "").trim().toUpperCase();
+    const affiliate = users.find(
+      (candidate) =>
+        candidate.isAffiliate &&
+        ((candidate.stripePromotionCodeId &&
+          candidate.stripePromotionCodeId === promotionCode.id) ||
+          (candidate.affiliateCode &&
+            String(candidate.affiliateCode).toUpperCase() === code)),
+    );
+    if (!affiliate) continue;
+    const processed = Array.isArray(affiliate.affiliateReferralSessionIds)
+      ? affiliate.affiliateReferralSessionIds
+      : [];
+    if (processed.includes(session.id)) return false;
+    affiliate.referralCount = Number(affiliate.referralCount || 0) + 1;
+    affiliate.affiliateReferralSessionIds = [...processed, session.id];
+    return true;
+  }
+  return false;
+}
+
 app.post(
   "/webhook",
   express.raw({ type: "application/json", limit: "1mb" }),
@@ -1273,6 +1386,10 @@ app.post(
       }
 
       const users = readUsers();
+      const affiliateReferralRecorded = await recordAffiliateReferral(
+        session,
+        users,
+      );
       const user =
         users.find((item) => referencedUserId && item.id === referencedUserId) ||
         users.find(
@@ -1281,6 +1398,7 @@ app.post(
             String(item.email || "").toLowerCase() === customerEmail,
         );
       if (!user) {
+        if (affiliateReferralRecorded) await writeUsers(users);
         console.error(
           `Stripe payment received for unknown user: ${referencedUserId || customerEmail || "missing reference"}`,
         );
@@ -1297,6 +1415,7 @@ app.post(
         )
           ? user.stripeDuoCheckoutSessionIds
           : [];
+        let usersChanged = affiliateReferralRecorded;
         if (!processedSlotSessions.includes(session.id)) {
           const code = await createUniquePaidFamilyToken(users);
           user.familyInvitationTokens = [
@@ -1314,14 +1433,16 @@ app.post(
             ...processedSlotSessions,
             session.id,
           ];
-          await writeUsers(users);
+          usersChanged = true;
         }
+        if (usersChanged) await writeUsers(users);
         return response.status(200).json({ received: true });
       }
 
       const processedSessions = Array.isArray(user.stripeCheckoutSessionIds)
         ? user.stripeCheckoutSessionIds
         : [];
+      let usersChanged = affiliateReferralRecorded;
       if (!processedSessions.includes(session.id)) {
         const paidAt = Date.now();
         user.paid = true;
@@ -1336,8 +1457,9 @@ app.post(
         user.subscriptionCancelledAt = null;
         user.subscriptionAccessEndsAt = null;
         user.stripeCheckoutSessionIds = [...processedSessions, session.id];
-        await writeUsers(users);
+        usersChanged = true;
       }
+      if (usersChanged) await writeUsers(users);
     }
 
     response.status(200).json({ received: true });
@@ -1507,6 +1629,16 @@ app.post("/api/auth/signup", async (request, response) => {
     adminFailedAttempts: 0,
     adminLockedUntil: null,
     isAdminBanned: false,
+    isAffiliate: false,
+    affiliateCode: null,
+    referralCount: 0,
+    affiliateApplication: {
+      hasApplied: false,
+      status: "pending",
+      channelName: "",
+      channelType: "",
+      reason: "",
+    },
   };
   const token = startUserSession(user);
   users.push(user);
@@ -2151,12 +2283,197 @@ app.post("/api/admin/unlock", auth, async (request, response) => {
   response.json(publicUser(user));
 });
 
+app.post("/api/affiliate/apply", auth, async (request, response) => {
+  const channelName = sanitizeText(request.body.channelName, 100);
+  const channelType = sanitizeText(request.body.channelType, 30).toLowerCase();
+  const reason = sanitizeText(request.body.reason, 500);
+  const allowedChannelTypes = new Set([
+    "youtube",
+    "tiktok",
+    "instagram",
+    "twitch",
+    "podcast",
+    "other",
+  ]);
+  if (!channelName || !allowedChannelTypes.has(channelType) || !reason)
+    return response.status(400).json({
+      error: "Enter a channel name, channel type, and application reason.",
+    });
+  const users = readUsers();
+  const applicant = users.find((entry) => entry.id === request.user.id);
+  if (!applicant)
+    return response.status(404).json({ error: "Account not found." });
+  if (applicant.isAffiliate)
+    return response.status(409).json({
+      code: "ALREADY_AFFILIATE",
+      error: "This account is already an approved affiliate.",
+    });
+  if (
+    applicant.affiliateApplication?.hasApplied &&
+    applicant.affiliateApplication.status === "pending"
+  )
+    return response.status(409).json({
+      code: "APPLICATION_PENDING",
+      error: "Your affiliate application is already pending.",
+    });
+  applicant.affiliateApplication = {
+    hasApplied: true,
+    status: "pending",
+    channelName,
+    channelType,
+    reason,
+    appliedAt: Date.now(),
+  };
+  await writeUsers(users);
+  response.status(201).json(publicUser(applicant));
+});
+
+function affiliateCodeBase(user) {
+  const applicationName = user.affiliateApplication?.channelName || "";
+  const emailName = String(user.email || "").split("@")[0];
+  return (
+    String(applicationName || emailName || "AFFILIATE")
+      .toUpperCase()
+      .replace(/[^A-Z0-9]/g, "")
+      .slice(0, 12) || "AFFILIATE"
+  );
+}
+
+function uniqueAffiliateCode(user, users) {
+  const base = affiliateCodeBase(user);
+  const existing = new Set(
+    users
+      .map((entry) => String(entry.affiliateCode || "").toUpperCase())
+      .filter(Boolean),
+  );
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const candidate = `${base}${crypto.randomInt(10, 100)}`;
+    if (!existing.has(candidate)) return candidate;
+  }
+  return `${base}${crypto.randomBytes(3).toString("hex").toUpperCase()}`;
+}
+
+app.get(
+  "/api/admin/affiliate/applications",
+  auth,
+  masterOnly,
+  (_request, response) => {
+    response.json(
+      readUsers()
+        .filter(
+          (entry) =>
+            entry.affiliateApplication?.hasApplied &&
+            entry.affiliateApplication.status === "pending",
+        )
+        .map((entry) => ({
+          userId: entry.id,
+          email: entry.email,
+          channelName: entry.affiliateApplication.channelName,
+          channelType: entry.affiliateApplication.channelType,
+          reason: entry.affiliateApplication.reason,
+          appliedAt: entry.affiliateApplication.appliedAt || null,
+        }))
+        .sort((left, right) => Number(left.appliedAt) - Number(right.appliedAt)),
+    );
+  },
+);
+
+app.post(
+  "/api/admin/affiliate/approve",
+  auth,
+  masterOnly,
+  async (request, response) => {
+    if (!stripe || !STRIPE_AFFILIATE_COUPON_ID)
+      return response.status(503).json({
+        code: "AFFILIATE_STRIPE_NOT_CONFIGURED",
+        error: "Set STRIPE_SECRET_KEY and STRIPE_AFFILIATE_COUPON_ID before approving affiliates.",
+      });
+    const userId = sanitizeText(request.body.userId, 80);
+    const users = readUsers();
+    const affiliate = users.find((entry) => entry.id === userId);
+    if (!affiliate || affiliate.affiliateApplication?.status !== "pending")
+      return response.status(404).json({
+        error: "Pending affiliate application not found.",
+      });
+    const code = uniqueAffiliateCode(affiliate, users);
+    try {
+      for (const paymentLinkId of [
+        STRIPE_PAYMENT_LINK_ID,
+        STRIPE_DUO_LINK_ID,
+      ].filter(Boolean)) {
+        await stripe.paymentLinks.update(paymentLinkId, {
+          allow_promotion_codes: true,
+        });
+      }
+      const promotionCode = await stripe.promotionCodes.create({
+        promotion: {
+          type: "coupon",
+          coupon: STRIPE_AFFILIATE_COUPON_ID,
+        },
+        code,
+        active: true,
+        metadata: {
+          d50_affiliate_user_id: affiliate.id,
+          d50_affiliate_email: affiliate.email,
+        },
+      });
+      affiliate.isAffiliate = true;
+      affiliate.affiliateCode = code;
+      affiliate.referralCount = Number(affiliate.referralCount || 0);
+      affiliate.stripePromotionCodeId = promotionCode.id;
+      affiliate.affiliateApplication = {
+        ...affiliate.affiliateApplication,
+        hasApplied: true,
+        status: "approved",
+        reviewedAt: Date.now(),
+        reviewedBy: request.user.id,
+      };
+      await writeUsers(users);
+      response.json(publicUser(affiliate));
+    } catch (error) {
+      console.error("Affiliate approval failed:", error.message);
+      response.status(502).json({
+        error: "Stripe could not create the affiliate Promotion Code.",
+      });
+    }
+  },
+);
+
+app.post(
+  "/api/admin/affiliate/reject",
+  auth,
+  masterOnly,
+  async (request, response) => {
+    const userId = sanitizeText(request.body.userId, 80);
+    const users = readUsers();
+    const applicant = users.find((entry) => entry.id === userId);
+    if (!applicant || applicant.affiliateApplication?.status !== "pending")
+      return response.status(404).json({
+        error: "Pending affiliate application not found.",
+      });
+    applicant.isAffiliate = false;
+    applicant.affiliateApplication = {
+      ...applicant.affiliateApplication,
+      hasApplied: true,
+      status: "rejected",
+      reviewedAt: Date.now(),
+      reviewedBy: request.user.id,
+    };
+    await writeUsers(users);
+    response.json({ rejected: true, userId });
+  },
+);
+
 const MASTER_ADMIN_UI_FRAGMENT = `
 <div id="adminHubModal" class="modal" hidden>
   <div class="modal-card admin-hub-card">
     <button class="modal-close" type="button" aria-label="Close">×</button>
     <p class="eye">MASTER ADMIN CONTROL</p>
     <h1>Reports &amp; Bans</h1>
+    <section class="admin-queue-section free-user-report-section">
+      <h2>Active Report Queue (Free User Reports)</h2>
+      <div id="freeUserReportsPanel" class="admin-hub-panel free-user-reports-panel"></div>
+    </section>
     <div class="admin-hub-board">
       <section class="admin-hub-column reports-column">
         <div class="admin-queue-section">
@@ -2180,6 +2497,11 @@ const MASTER_ADMIN_UI_FRAGMENT = `
         </div>
       </section>
     </div>
+    <section class="admin-queue-section affiliate-applications-section">
+      <p class="eye">PARTNER PROGRAM</p>
+      <h2>Affiliate Applications Queue</h2>
+      <div id="affiliateApplicationsPanel" class="admin-hub-panel affiliate-applications-panel"></div>
+    </section>
     <section class="admin-code-generator">
       <p class="eye">SECURE ROLE MANAGEMENT</p>
       <h2>ADMIN ACCESS CODES GENERATOR</h2>
@@ -2395,6 +2717,58 @@ app.post("/api/reports", auth, reporterOnly, async (request, response) => {
     reportedUserEmail: reportedUser?.email || null,
     reporterId: request.user.id,
     reporterEmail: request.user.email,
+    remembered: false,
+    createdAt: Date.now(),
+  };
+  const reports = readReports();
+  reports.push(report);
+  await writeReports(reports);
+  response.status(201).json(report);
+});
+app.post("/api/reports/submit", optionalAuth, async (request, response) => {
+  const itemId = sanitizeText(request.body.itemId, 80);
+  const reason = sanitizeText(request.body.reason, 500);
+  if (!reason)
+    return response.status(400).json({
+      code: "REPORT_REASON_REQUIRED",
+      error: "A written reason is required before sending a report.",
+    });
+  if (!itemId)
+    return response.status(400).json({
+      code: "REPORT_SONG_REQUIRED",
+      error: "Select a song to report.",
+    });
+  const song = readSongs().find((entry) => entry.id === itemId);
+  if (!song)
+    return response.status(404).json({
+      error: "That song is no longer available.",
+    });
+  const users = readUsers();
+  const reportedUserId = song.ownerId || song.uploadedBy || null;
+  const reportedUser = reportedUserId
+    ? users.find((entry) => entry.id === reportedUserId)
+    : null;
+  const isFreeOrGuest = !request.user || !request.user.paid;
+  const reporterIp = sanitizeText(
+    request.ip || request.socket?.remoteAddress || "Unknown IP",
+    100,
+  );
+  const report = {
+    id: crypto.randomUUID(),
+    type: "song-report",
+    message: reason,
+    itemType: "song",
+    itemId: song.id,
+    itemName: song.title,
+    reason,
+    songId: song.id,
+    reportedUserId,
+    reportedUserEmail: reportedUser?.email || null,
+    reporterId: request.user?.id || null,
+    reporterEmail: request.user?.email || null,
+    reporterIp: request.user ? null : reporterIp,
+    senderDisplay: request.user?.email || reporterIp,
+    queueType: isFreeOrGuest ? "free_user_active" : "standard_active",
     remembered: false,
     createdAt: Date.now(),
   };
