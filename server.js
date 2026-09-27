@@ -951,7 +951,7 @@ function publicUser(user) {
     referralCount: Number(user.referralCount || 0),
     affiliateApplication: {
       hasApplied: Boolean(application.hasApplied),
-      status: ["pending", "approved", "rejected"].includes(application.status)
+      status: ["pending", "approved", "rejected", "revoked"].includes(application.status)
         ? application.status
         : "pending",
       channelName: application.channelName || "",
@@ -2664,6 +2664,58 @@ app.get("/api/admin/earnings", auth, masterOnly, async (_request, response) => {
   }
 });
 
+app.get("/api/admin/affiliate/approved", auth, masterOnly, (_request, response) => {
+  response.json(readUsers()
+    .filter((entry) => entry.isAffiliate && entry.affiliateCode)
+    .map((entry) => ({
+      userId: entry.id,
+      email: entry.email,
+      channelName: entry.affiliateApplication?.channelName || "Creator",
+      channelType: entry.affiliateApplication?.channelType || "",
+      code: entry.affiliateCode,
+      referralCount: Number(entry.referralCount || 0),
+      approvedAt: entry.affiliateApplication?.reviewedAt || null,
+    }))
+    .sort((a, b) => a.channelName.localeCompare(b.channelName)));
+});
+
+app.post("/api/admin/affiliate/remove", auth, masterOnly, async (request, response) => {
+  const userId = sanitizeText(request.body.userId, 80);
+  const users = readUsers();
+  const affiliate = users.find((entry) => entry.id === userId);
+  if (!affiliate?.isAffiliate || !affiliate.affiliateCode)
+    return response.status(404).json({ error: "Approved affiliate not found." });
+  if (!stripe || !affiliate.stripePromotionCodeId)
+    return response.status(503).json({
+      error: "Stripe or this affiliate's promotion code ID is missing; code removal needs manual review.",
+    });
+  try {
+    // Stripe has no promotion-code delete API. Deactivate first so the old
+    // code cannot be redeemed if saving the local account later fails.
+    await stripe.promotionCodes.update(affiliate.stripePromotionCodeId, {
+      active: false,
+    });
+    affiliate.isAffiliate = false;
+    affiliate.affiliateCode = null;
+    affiliate.stripePromotionCodeId = null;
+    affiliate.referralCount = 0;
+    affiliate.affiliateReferralSessionIds = [];
+    affiliate.affiliateApplication = {
+      ...affiliate.affiliateApplication,
+      status: "revoked",
+      revokedAt: Date.now(),
+      revokedBy: request.user.id,
+    };
+    await writeUsers(users);
+    response.json({ removed: true, userId });
+  } catch (error) {
+    console.error("Affiliate removal failed:", error.message);
+    response.status(502).json({
+      error: "Could not finish removing the affiliate. Check the Render logs and retry.",
+    });
+  }
+});
+
 app.post(
   "/api/admin/affiliate/reject",
   auth,
@@ -2726,6 +2778,8 @@ const MASTER_ADMIN_UI_FRAGMENT = `
       <p class="eye">PARTNER PROGRAM</p>
       <h2>Affiliate Applications Queue</h2>
       <div id="affiliateApplicationsPanel" class="admin-hub-panel affiliate-applications-panel"></div>
+      <h2>Approved affiliate codes</h2>
+      <div id="approvedAffiliatesPanel" class="admin-hub-panel affiliate-applications-panel"></div>
     </section>
     <section class="admin-queue-section">
       <p class="eye">D50 PAYMENTS</p>
