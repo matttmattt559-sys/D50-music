@@ -1366,12 +1366,14 @@ function promotionCouponId(promotionCode) {
 }
 
 async function recordAffiliateReferral(session, users, purchaserUserId) {
-  // Discounted D50 Checkout Sessions are created server-side with the exact
-  // approved promotion code ID in signed Stripe session metadata.
+  // The server records the approved creator in Stripe Checkout metadata.
+  const directAffiliateId = session.metadata?.d50_affiliate_user_id;
   const directPromotionId = session.metadata?.d50_affiliate_promo_id;
-  if (session.metadata?.d50_purchase === "personal_premium" && directPromotionId) {
+  if (session.metadata?.d50_purchase === "personal_premium" &&
+      (directAffiliateId || directPromotionId)) {
     const affiliate = users.find((candidate) => candidate.isAffiliate &&
-      candidate.stripePromotionCodeId === directPromotionId);
+      (directAffiliateId ? candidate.id === directAffiliateId :
+        candidate.stripePromotionCodeId === directPromotionId));
     if (!affiliate || affiliate.id === purchaserUserId) return false;
     const processed = Array.isArray(affiliate.affiliateReferralSessionIds)
       ? affiliate.affiliateReferralSessionIds : [];
@@ -1789,20 +1791,25 @@ app.post("/api/checkout", auth, async (request, response) => {
     if (!checkoutBaseUrl)
       return response.status(503).json({ error: "Creator code checkout needs APP_BASE_URL set to your live HTTPS app address." });
     const affiliate = readUsers().find((entry) => entry.isAffiliate &&
-      entry.affiliateCode?.toUpperCase() === affiliateCode &&
-      entry.stripePromotionCodeId);
+      entry.affiliateCode?.toUpperCase() === affiliateCode);
     if (!affiliate || affiliate.id === request.user.id)
       return response.status(400).json({ error: "That creator code is unavailable for this account." });
     try {
-      const promotionCode = await stripe.promotionCodes.retrieve(affiliate.stripePromotionCodeId);
-      if (!promotionCode.active || promotionCode.valid === false ||
-          promotionCode.code?.toUpperCase() !== affiliateCode ||
-          (STRIPE_AFFILIATE_COUPON_ID &&
-            promotionCouponId(promotionCode) !== STRIPE_AFFILIATE_COUPON_ID))
-        return response.status(400).json({ error: "That creator code is no longer valid." });
       let discountedLineItem;
       if (STRIPE_AFFILIATE_PRICE_ID) {
-        const discountedPrice = await stripe.prices.retrieve(STRIPE_AFFILIATE_PRICE_ID);
+        const configuredId = STRIPE_AFFILIATE_PRICE_ID;
+        let discountedPrice;
+        if (configuredId.startsWith("prod_")) {
+          const product = await stripe.products.retrieve(configuredId, { expand: ["default_price"] });
+          if (!product.active || !product.default_price)
+            return response.status(503).json({ error: "The 28.80 DKK Stripe product needs an active default price." });
+          discountedPrice = typeof product.default_price === "string"
+            ? await stripe.prices.retrieve(product.default_price) : product.default_price;
+        } else if (configuredId.startsWith("price_")) {
+          discountedPrice = await stripe.prices.retrieve(configuredId);
+        } else {
+          return response.status(503).json({ error: "STRIPE_AFFILIATE_PRICE_ID must be a Stripe price_... or prod_... ID." });
+        }
         if (!discountedPrice.active || discountedPrice.currency !== "dkk" ||
             discountedPrice.unit_amount !== 2880 || discountedPrice.type !== "one_time")
           return response.status(503).json({ error: "The affiliate Stripe price must be an active, one-time 28.80 DKK price." });
@@ -1848,7 +1855,7 @@ app.post("/api/checkout", auth, async (request, response) => {
           userId: request.user.id,
           d50_purchase: "personal_premium",
           d50_checkout: "affiliate",
-          d50_affiliate_promo_id: promotionCode.id,
+          d50_affiliate_user_id: affiliate.id,
         },
         success_url: `${checkoutBaseUrl}/?checkout=success`,
         cancel_url: `${checkoutBaseUrl}/?checkout=cancel`,
@@ -2561,11 +2568,6 @@ app.post(
   auth,
   masterOnly,
   async (request, response) => {
-    if (!stripe || !STRIPE_AFFILIATE_COUPON_ID)
-      return response.status(503).json({
-        code: "AFFILIATE_STRIPE_NOT_CONFIGURED",
-        error: "Set STRIPE_SECRET_KEY and STRIPE_AFFILIATE_COUPON_ID before approving affiliates.",
-      });
     const userId = sanitizeText(request.body.userId, 80);
     const users = readUsers();
     const affiliate = users.find((entry) => entry.id === userId);
@@ -2591,34 +2593,10 @@ app.post(
         error: "That requested affiliate code is no longer available.",
       });
     try {
-      // A missing coupon is the most common setup error. Check it before
-      // changing either Payment Link so the admin sees an actionable message.
-      try {
-        const coupon = await stripe.coupons.retrieve(STRIPE_AFFILIATE_COUPON_ID);
-        if (!coupon.valid) throw new Error("The configured coupon is no longer valid.");
-      } catch (error) {
-        console.error("Affiliate coupon lookup failed:", error.message);
-        return response.status(503).json({
-          code: "AFFILIATE_COUPON_INVALID",
-          error: `Stripe coupon ${STRIPE_AFFILIATE_COUPON_ID} was not found or is invalid. Check STRIPE_AFFILIATE_COUPON_ID and the Stripe account/mode in Render.`,
-        });
-      }
-      const promotionCode = await stripe.promotionCodes.create({
-        promotion: {
-          type: "coupon",
-          coupon: STRIPE_AFFILIATE_COUPON_ID,
-        },
-        code,
-        active: true,
-        metadata: {
-          d50_affiliate_user_id: affiliate.id,
-          d50_affiliate_email: affiliate.email,
-        },
-      });
       affiliate.isAffiliate = true;
       affiliate.affiliateCode = code;
       affiliate.referralCount = Number(affiliate.referralCount || 0);
-      affiliate.stripePromotionCodeId = promotionCode.id;
+      affiliate.stripePromotionCodeId = null;
       affiliate.affiliateApplication = {
         ...affiliate.affiliateApplication,
         hasApplied: true,
@@ -2627,26 +2605,7 @@ app.post(
         reviewedBy: request.user.id,
       };
       await writeUsers(users);
-      // The discount is for Premium; a second extra-slots link is unrelated.
-      // A Payment Link update failure must not discard a successfully created
-      // promotion code or cause retries to create duplicate Stripe objects.
-      let paymentLinkWarning = "";
-      if (STRIPE_PAYMENT_LINK_ID) {
-        try {
-          const paymentLink = await stripe.paymentLinks.retrieve(STRIPE_PAYMENT_LINK_ID);
-          if (!paymentLink.allow_promotion_codes) {
-            await stripe.paymentLinks.update(STRIPE_PAYMENT_LINK_ID, {
-              allow_promotion_codes: true,
-            });
-          }
-        } catch (error) {
-          console.error(`Affiliate Payment Link ${STRIPE_PAYMENT_LINK_ID} update failed:`, error.message);
-          paymentLinkWarning = `Code created. Stripe could not enable code entry on the Payment Link: ${error.message}. Buyers can use this code in D50's Upgrade to Premium popup.`;
-        }
-      } else {
-        paymentLinkWarning = "Code created, but STRIPE_PAYMENT_LINK_ID is missing. Configure the Premium Payment Link before buyers use this code.";
-      }
-      response.json({ ...publicUser(affiliate), paymentLinkWarning });
+      response.json(publicUser(affiliate));
     } catch (error) {
       console.error("Affiliate approval failed:", error.message);
       const codeConflict =
@@ -2722,16 +2681,15 @@ app.post("/api/admin/affiliate/remove", auth, masterOnly, async (request, respon
   const affiliate = users.find((entry) => entry.id === userId);
   if (!affiliate?.isAffiliate || !affiliate.affiliateCode)
     return response.status(404).json({ error: "Approved affiliate not found." });
-  if (!stripe || !affiliate.stripePromotionCodeId)
+  if (affiliate.stripePromotionCodeId && !stripe)
     return response.status(503).json({
-      error: "Stripe or this affiliate's promotion code ID is missing; code removal needs manual review.",
+      error: "Stripe is required to deactivate this creator's older promotion code.",
     });
   try {
-    // Stripe has no promotion-code delete API. Deactivate first so the old
-    // code cannot be redeemed if saving the local account later fails.
-    await stripe.promotionCodes.update(affiliate.stripePromotionCodeId, {
-      active: false,
-    });
+    if (affiliate.stripePromotionCodeId)
+      await stripe.promotionCodes.update(affiliate.stripePromotionCodeId, {
+        active: false,
+      });
     affiliate.isAffiliate = false;
     affiliate.affiliateCode = null;
     affiliate.stripePromotionCodeId = null;

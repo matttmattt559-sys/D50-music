@@ -1,4 +1,4 @@
-const CACHE_NAME = "d50-app-shell-v22";
+const CACHE_NAME = "d50-app-shell-v23";
 const APP_SHELL = [
   "/",
   "/index.html",
