@@ -1,6 +1,7 @@
 const $ = (s) => document.querySelector(s),
   $$ = (s) => document.querySelectorAll(s);
 let songs = [],
+  savedSongs = [],
   categories = [],
   managedUploads = [],
   user = null,
@@ -468,6 +469,17 @@ function updateSongLikeElements(song) {
   if (currentId === song.id) heart();
 }
 
+function syncSavedSong(song) {
+  const index = savedSongs.findIndex((entry) => entry.id === song.id);
+  if (song.liked) {
+    if (index < 0) savedSongs.unshift(song);
+    else savedSongs[index] = song;
+  } else if (index >= 0) {
+    savedSongs.splice(index, 1);
+  }
+  renderLibrary();
+}
+
 function updateCategoryLikeElements(category) {
   $$('[data-category-id]').forEach((element) => {
     if (element.dataset.categoryId !== String(category.id)) return;
@@ -496,7 +508,10 @@ function applyOptimisticLike(state) {
         ? Number(state.desiredLiked) - Number(state.confirmedLiked)
         : 0),
   );
-  if (state.type === "song") updateSongLikeElements(state.item);
+  if (state.type === "song") {
+    updateSongLikeElements(state.item);
+    syncSavedSong(state.item);
+  }
   else updateCategoryLikeElements(state.item);
 }
 
@@ -523,9 +538,10 @@ async function flushLikeUpdate(key) {
   } catch (error) {
     state.item.liked = state.confirmedLiked;
     state.item.likedCount = state.confirmedCount;
-    state.type === "song"
-      ? updateSongLikeElements(state.item)
-      : updateCategoryLikeElements(state.item);
+    if (state.type === "song") {
+      updateSongLikeElements(state.item);
+      syncSavedSong(state.item);
+    } else updateCategoryLikeElements(state.item);
     pendingLikeUpdates.delete(key);
     alert("The like could not be saved. Check your connection and try again.");
     return;
@@ -533,9 +549,10 @@ async function flushLikeUpdate(key) {
   if (!response.ok) {
     state.item.liked = state.confirmedLiked;
     state.item.likedCount = state.confirmedCount;
-    state.type === "song"
-      ? updateSongLikeElements(state.item)
-      : updateCategoryLikeElements(state.item);
+    if (state.type === "song") {
+      updateSongLikeElements(state.item);
+      syncSavedSong(state.item);
+    } else updateCategoryLikeElements(state.item);
     pendingLikeUpdates.delete(key);
     return handleLocked(response);
   }
@@ -546,9 +563,10 @@ async function flushLikeUpdate(key) {
   if (state.desiredLiked === state.confirmedLiked) {
     state.item.liked = state.confirmedLiked;
     state.item.likedCount = state.confirmedCount;
-    state.type === "song"
-      ? updateSongLikeElements(state.item)
-      : updateCategoryLikeElements(state.item);
+    if (state.type === "song") {
+      updateSongLikeElements(state.item);
+      syncSavedSong(state.item);
+    } else updateCategoryLikeElements(state.item);
     pendingLikeUpdates.delete(key);
     return;
   }
@@ -874,7 +892,7 @@ function renderLibrary() {
     container.append(empty);
     return;
   }
-  const likedSongs = songs.filter((song) => song.liked);
+  const likedSongs = savedSongs.filter((song) => song.liked);
   const privateCategories = categories.filter(
     (category) => category.ownerId === user.id,
   );
@@ -1097,7 +1115,10 @@ async function syncCreatorStats() {
           goldBoosted: latest.goldBoosted,
           silverBoosted: latest.silverBoosted,
         });
-        if (likeChanged) updateSongLikeElements(existing);
+        if (likeChanged) {
+          updateSongLikeElements(existing);
+          syncSavedSong(existing);
+        }
       }
     });
     latestCategories.forEach((latest) => {
@@ -2346,16 +2367,18 @@ async function load() {
   songsHaveMore = true;
   songsPageLoading = true;
   updateSongLoadStatus();
-  const [songsResponse, categoriesResponse, uploadsResponse] = await Promise.all([
+  const [songsResponse, categoriesResponse, uploadsResponse, libraryResponse] = await Promise.all([
     apiFetch(`/api/songs?page=1&limit=${SONG_PAGE_SIZE}`),
     apiFetch("/api/categories"),
     user ? apiFetch("/api/my-uploads") : Promise.resolve(null),
+    user ? apiFetch("/api/library/songs", { cache: "no-store" }) : Promise.resolve(null),
   ]);
 
   if (
     !songsResponse.ok ||
     !categoriesResponse.ok ||
-    (uploadsResponse && !uploadsResponse.ok)
+    (uploadsResponse && !uploadsResponse.ok) ||
+    (libraryResponse && !libraryResponse.ok)
   ) {
     throw new Error("Could not load your private catalog.");
   }
@@ -2364,6 +2387,10 @@ async function load() {
     songsResponse.json(),
     categoriesResponse.json(),
   ]);
+  savedSongs = libraryResponse ? await libraryResponse.json() : [];
+  savedSongs = savedSongs.map((entry) =>
+    songs.find((song) => song.id === entry.id) || entry,
+  );
   songPage = 1;
   songsHaveMore = songsResponse.headers.get("X-Has-More") === "true";
   songsPageLoading = false;
@@ -2397,7 +2424,13 @@ async function loadNextSongPage() {
     if (!response.ok) throw new Error("Could not load more songs.");
     const nextSongs = await response.json();
     const knownIds = new Set(songs.map((song) => song.id));
-    songs.push(...nextSongs.filter((song) => !knownIds.has(song.id)));
+    songs.push(...nextSongs.filter((song) => !knownIds.has(song.id)).map((song) => {
+      const saved = savedSongs.find((entry) => entry.id === song.id);
+      if (!saved) return song;
+      if (!pendingLikeUpdates.has(likeUpdateKey("song", song.id)))
+        Object.assign(saved, song);
+      return saved;
+    }));
     songPage = nextPage;
     songsHaveMore = response.headers.get("X-Has-More") === "true";
     render();

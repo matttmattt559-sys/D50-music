@@ -3272,6 +3272,14 @@ app.get("/api/songs", optionalAuth, async (request, response) => {
   response.json(pageSongs.map((song) => publicSong(song, request.user)));
 });
 
+app.get("/api/library/songs", auth, (request, response) => {
+  response.json(readSongs()
+    .filter((song) => (!song.status || song.status === "approved") &&
+      Array.isArray(song.likedBy) && song.likedBy.includes(request.user.id))
+    .sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0))
+    .map((song) => publicSong(song, request.user)));
+});
+
 app.get("/api/my-uploads", auth, (request, response) => {
   response.json(
     readSongs()
