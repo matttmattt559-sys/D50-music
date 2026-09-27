@@ -90,6 +90,9 @@ const STRIPE_DUO_LINK_ID = String(
 const STRIPE_AFFILIATE_COUPON_ID = String(
   process.env.STRIPE_AFFILIATE_COUPON_ID || "",
 ).trim();
+const STRIPE_AFFILIATE_PRICE_ID = String(
+  process.env.STRIPE_AFFILIATE_PRICE_ID || "",
+).trim();
 const APP_BASE_URL = String(process.env.APP_BASE_URL || "")
   .trim()
   .replace(/\/$/, "");
@@ -1801,10 +1804,25 @@ app.post("/api/checkout", auth, async (request, response) => {
           price?.currency !== "dkk" || price?.unit_amount !== 3600 ||
           price?.type !== "one_time" || !price?.id)
         return response.status(503).json({ error: "The 36 DKK Premium price needs to be checked in Stripe." });
+      const productId = typeof price.product === "string" ? price.product : price.product?.id;
+      let discountedLineItem;
+      if (STRIPE_AFFILIATE_PRICE_ID) {
+        const discountedPrice = await stripe.prices.retrieve(STRIPE_AFFILIATE_PRICE_ID);
+        if (!discountedPrice.active || discountedPrice.currency !== "dkk" ||
+            discountedPrice.unit_amount !== 2880 || discountedPrice.type !== "one_time")
+          return response.status(503).json({ error: "The affiliate Stripe price must be an active, one-time 28.80 DKK price." });
+        discountedLineItem = { price: discountedPrice.id, quantity: 1 };
+      } else {
+        if (!productId)
+          return response.status(503).json({ error: "The Premium product needs to be checked in Stripe." });
+        discountedLineItem = {
+          price_data: { currency: "dkk", unit_amount: 2880, product: productId },
+          quantity: 1,
+        };
+      }
       const session = await stripe.checkout.sessions.create({
         mode: "payment",
-        line_items: [{ price: price.id, quantity: 1 }],
-        discounts: [{ promotion_code: promotionCode.id }],
+        line_items: [discountedLineItem],
         client_reference_id: request.user.id,
         customer_email: request.user.email,
         metadata: {
