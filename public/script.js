@@ -3955,12 +3955,14 @@ $("#affiliateApplicationForm").onsubmit = async (event) => {
 let reportModeActive = false;
 let reportSelectionLocked = false;
 function startReportMode() {
+  if (reportModeActive) return finishReportMode();
   hideModals();
   finishBoostMode();
   reportModeActive = true;
   reportSelectionLocked = false;
   document.body.classList.add("report-mode-active");
   $("#reportModeBadge").hidden = false;
+  $("#reportContentButton").textContent = "Cancel report";
 }
 function openReportForSong(songId) {
   if (!reportModeActive || reportSelectionLocked) return;
@@ -3968,6 +3970,7 @@ function openReportForSong(songId) {
   reportModeActive = false;
   document.body.classList.remove("report-mode-active");
   $("#reportModeBadge").hidden = true;
+  $("#reportContentButton").textContent = "Report";
   const select = $("#reportSongSelect");
   select.replaceChildren(new Option("Select a song…", ""));
   [...songs]
@@ -3986,6 +3989,7 @@ function finishReportMode() {
   reportModeActive = false;
   reportSelectionLocked = false;
   document.body.classList.remove("report-mode-active");
+  $("#reportContentButton").textContent = "Report";
   const badge = $("#reportModeBadge");
   if (badge) badge.hidden = true;
   $("#reportSubmitModal").hidden = true;
@@ -4040,10 +4044,19 @@ document.addEventListener("click", (event) => {
   if (!reportModeActive) return;
   const target = event.target.closest('[data-report-id][data-report-type="song"]');
   if (!target || event.target.closest(".modal, #reportModeBadge")) return;
+  // A user can still press a song's Play control while report mode is on.
+  // Exit report mode and allow the original playback handler to run.
+  if (event.target.closest("button, select, option, input, a")) {
+    finishReportMode();
+    return;
+  }
   event.preventDefault();
   event.stopImmediatePropagation();
   openReportForSong(target.dataset.reportId);
 }, true);
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && reportModeActive) finishReportMode();
+});
 $("#cancelReportMode").onclick = finishReportMode;
 $("#reportConfirmationClose").onclick = finishReportMode;
 $("#reportConfirmationDone").onclick = finishReportMode;
