@@ -1780,31 +1780,26 @@ app.post("/api/checkout", auth, async (request, response) => {
   if (purchase !== "extra_slots" && affiliateCode) {
     if (!/^[A-Z0-9]{3,20}$/.test(affiliateCode))
       return response.status(400).json({ error: "Enter a valid creator code (3–20 letters or numbers)." });
-    if (!stripe || !STRIPE_AFFILIATE_COUPON_ID || !STRIPE_PAYMENT_LINK_ID ||
-        !/^https:\/\//.test(APP_BASE_URL))
-      return response.status(503).json({ error: "Creator code checkout is not configured yet." });
+    const checkoutBaseUrl = /^https:\/\//.test(APP_BASE_URL)
+      ? APP_BASE_URL
+      : request.secure && /^[a-z0-9-]+\.onrender\.com$/i.test(request.hostname)
+        ? `https://${request.hostname}` : "";
+    if (!stripe)
+      return response.status(503).json({ error: "Creator code checkout needs STRIPE_SECRET_KEY on the server." });
+    if (!checkoutBaseUrl)
+      return response.status(503).json({ error: "Creator code checkout needs APP_BASE_URL set to your live HTTPS app address." });
     const affiliate = readUsers().find((entry) => entry.isAffiliate &&
       entry.affiliateCode?.toUpperCase() === affiliateCode &&
       entry.stripePromotionCodeId);
     if (!affiliate || affiliate.id === request.user.id)
       return response.status(400).json({ error: "That creator code is unavailable for this account." });
     try {
-      const [promotionCode, lineItems, coupon] = await Promise.all([
-        stripe.promotionCodes.retrieve(affiliate.stripePromotionCodeId),
-        stripe.paymentLinks.listLineItems(STRIPE_PAYMENT_LINK_ID, { limit: 2 }),
-        stripe.coupons.retrieve(STRIPE_AFFILIATE_COUPON_ID),
-      ]);
-      const price = lineItems.data[0]?.price;
+      const promotionCode = await stripe.promotionCodes.retrieve(affiliate.stripePromotionCodeId);
       if (!promotionCode.active || promotionCode.valid === false ||
           promotionCode.code?.toUpperCase() !== affiliateCode ||
-          promotionCouponId(promotionCode) !== STRIPE_AFFILIATE_COUPON_ID ||
-          !coupon.valid || coupon.percent_off !== 20)
+          (STRIPE_AFFILIATE_COUPON_ID &&
+            promotionCouponId(promotionCode) !== STRIPE_AFFILIATE_COUPON_ID))
         return response.status(400).json({ error: "That creator code is no longer valid." });
-      if (lineItems.data.length !== 1 || lineItems.data[0].quantity !== 1 ||
-          price?.currency !== "dkk" || price?.unit_amount !== 3600 ||
-          price?.type !== "one_time" || !price?.id)
-        return response.status(503).json({ error: "The 36 DKK Premium price needs to be checked in Stripe." });
-      const productId = typeof price.product === "string" ? price.product : price.product?.id;
       let discountedLineItem;
       if (STRIPE_AFFILIATE_PRICE_ID) {
         const discountedPrice = await stripe.prices.retrieve(STRIPE_AFFILIATE_PRICE_ID);
@@ -1813,12 +1808,36 @@ app.post("/api/checkout", auth, async (request, response) => {
           return response.status(503).json({ error: "The affiliate Stripe price must be an active, one-time 28.80 DKK price." });
         discountedLineItem = { price: discountedPrice.id, quantity: 1 };
       } else {
-        if (!productId)
-          return response.status(503).json({ error: "The Premium product needs to be checked in Stripe." });
-        discountedLineItem = {
-          price_data: { currency: "dkk", unit_amount: 2880, product: productId },
-          quantity: 1,
-        };
+        const matchingPrices = [];
+        for await (const candidate of stripe.prices.list({ active: true, currency: "dkk", limit: 100 })) {
+          if (candidate.unit_amount === 2880 && candidate.type === "one_time")
+            matchingPrices.push(candidate);
+        }
+        const premiumPrices = [];
+        for (const candidate of matchingPrices) {
+          const product = await stripe.products.retrieve(candidate.product);
+          if (product.active && product.name.trim().toLowerCase() === "d50 premium")
+            premiumPrices.push(candidate);
+        }
+        if (premiumPrices.length === 1) {
+          discountedLineItem = { price: premiumPrices[0].id, quantity: 1 };
+        } else if (STRIPE_PAYMENT_LINK_ID) {
+          const lineItems = await stripe.paymentLinks.listLineItems(STRIPE_PAYMENT_LINK_ID, { limit: 2 });
+          const price = lineItems.data[0]?.price;
+          if (lineItems.data.length !== 1 || lineItems.data[0].quantity !== 1 ||
+              price?.currency !== "dkk" || price?.unit_amount !== 3600 ||
+              price?.type !== "one_time")
+            return response.status(503).json({ error: "The 36 DKK Premium price needs to be checked in Stripe." });
+          const productId = typeof price.product === "string" ? price.product : price.product?.id;
+          if (!productId)
+            return response.status(503).json({ error: "The Premium product needs to be checked in Stripe." });
+          discountedLineItem = {
+            price_data: { currency: "dkk", unit_amount: 2880, product: productId },
+            quantity: 1,
+          };
+        } else {
+          return response.status(503).json({ error: "Set STRIPE_AFFILIATE_PRICE_ID to the 28.80 DKK price ID in Stripe; multiple or no matching D50 Premium prices were found." });
+        }
       }
       const session = await stripe.checkout.sessions.create({
         mode: "payment",
@@ -1831,8 +1850,8 @@ app.post("/api/checkout", auth, async (request, response) => {
           d50_checkout: "affiliate",
           d50_affiliate_promo_id: promotionCode.id,
         },
-        success_url: `${APP_BASE_URL}/?checkout=success`,
-        cancel_url: `${APP_BASE_URL}/?checkout=cancel`,
+        success_url: `${checkoutBaseUrl}/?checkout=success`,
+        cancel_url: `${checkoutBaseUrl}/?checkout=cancel`,
       });
       return response.json({ product: "personal_premium", url: session.url });
     } catch (error) {
