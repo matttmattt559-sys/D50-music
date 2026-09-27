@@ -13,7 +13,7 @@
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" href="/icons/d50-icon-192.png" sizes="192x192" />
     <link rel="apple-touch-icon" href="/icons/d50-icon-180.png" sizes="180x180" />
-    <link rel="stylesheet" href="style.css?v=20260927-report-play-21" />
+    <link rel="stylesheet" href="style.css?v=20260927-affiliate-code-16" />
     <link rel="stylesheet" href="group-subscription.css?v=20260920-1" />
   </head>
   <body class="dashboard-active main-app-container">
@@ -443,15 +443,7 @@
           You've reached your free limit. Upgrade to Premium to unlock unlimited
           listening, liking, and uploading!
         </p>
-        <button id="upgradeNow" class="primary-button" type="button">Pay 36 DKK for Premium</button>
-        <form id="affiliateCheckoutForm" class="affiliate-checkout-form">
-          <label for="affiliateCheckoutCode">Have a creator code? Get 20% off</label>
-          <div class="affiliate-checkout-controls">
-            <input id="affiliateCheckoutCode" name="code" maxlength="20" pattern="[A-Za-z0-9]{3,20}" autocomplete="off" placeholder="Enter code" required />
-            <button id="affiliateCheckoutButton" type="submit" class="primary-button">Apply &amp; pay 28.80 DKK</button>
-          </div>
-          <p id="affiliateCheckoutMessage" class="form-message" role="status"></p>
-        </form>
+        <button id="upgradeNow" class="primary-button">Pay for Premium</button>
       </div>
     </div>
     <div id="groupSubscriptionModal" class="modal" hidden>
@@ -565,7 +557,7 @@
       </div>
     </div>
     <div id="reportModeBadge" class="report-mode-badge" hidden>
-      Click a song to report it…
+      Click on any song card, category card, or image cover to report it…
       <button id="cancelReportMode" type="button">Cancel</button>
     </div>
     <div id="boostModeBadge" class="boost-mode-badge" hidden>
@@ -577,7 +569,7 @@
         <button class="modal-close" type="button" aria-label="Close report form">×</button>
         <p class="eye">REPORT CONTENT</p>
         <h1 id="reportSubmitTitle">Report a song</h1>
-        <p>Tell the moderation team what is wrong with this song.</p>
+        <p>Select the track and tell the moderation team what is wrong.</p>
         <form id="reportSubmitForm">
           <label for="reportSongSelect">Song</label>
           <select id="reportSongSelect" required>
@@ -616,20 +608,6 @@
           <button class="primary-button" type="submit">Submit Application</button>
         </form>
         <p id="affiliateApplicationMessage" class="form-message" aria-live="polite"></p>
-      </div>
-    </div>
-    <div id="affiliatePartnerModal" class="modal" hidden>
-      <div class="modal-card affiliate-application-card" role="dialog" aria-modal="true" aria-labelledby="affiliatePartnerTitle">
-        <button class="modal-close" type="button" aria-label="Close partner details">×</button>
-        <p class="eye">D50 PARTNER PROGRAM</p>
-        <h1 id="affiliatePartnerTitle">You're now a D50 partner!</h1>
-        <p>Share your code with your audience. Each eligible paid Premium signup using it adds one referral.</p>
-        <div class="affiliate-partner-code">
-          <span>Your creator code</span>
-          <strong id="affiliatePartnerCode"></strong>
-          <button id="affiliateCopyCode" class="primary-button" type="button">Copy code</button>
-        </div>
-        <p class="affiliate-partner-count">Your referral count: <strong id="affiliatePartnerCount">0</strong></p>
       </div>
     </div>
     <div id="reportConfirmationModal" class="modal" hidden>
@@ -688,6 +666,6 @@
       </div>
     </div>
     <script src="pwa.js?v=20260921-pwa-1"></script>
-    <script src="script.js?v=20260927-report-play-21"></script>
+    <script src="script.js?v=20260927-affiliate-code-16"></script>
   </body>
 </html>

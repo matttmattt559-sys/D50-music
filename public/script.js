@@ -1028,20 +1028,10 @@ async function syncCreatorStats() {
       const permissionsChanged =
         user.canManage !== latestProfile.canManage ||
         user.banned !== latestProfile.banned;
-      const partnerChanged =
-        user.isAffiliate !== latestProfile.isAffiliate ||
-        user.affiliateCode !== latestProfile.affiliateCode ||
-        user.referralCount !== latestProfile.referralCount ||
-        user.affiliateApplication?.status !== latestProfile.affiliateApplication?.status;
-      const newlyApproved = !user.isAffiliate && latestProfile.isAffiliate;
       Object.assign(user, latestProfile);
       renderBoostMilestones();
       renderFreeUploadCapacity();
-      if (permissionsChanged || partnerChanged) updateProfile();
-      if (partnerChanged && !$("#affiliatePartnerModal").hidden)
-        renderPartnerDetails();
-      if (newlyApproved && !document.querySelector(".modal:not([hidden])"))
-        showPartnerDetails();
+      if (permissionsChanged) updateProfile();
     }
     let requiresRender = false;
     latestSongs.forEach((latest) => {
@@ -3431,7 +3421,7 @@ function renderAffiliateApplications(applications) {
         approve.disabled = false;
         return alert(data.error || "The affiliate could not be approved.");
       }
-      alert(`Affiliate approved. Stripe coupon code: ${data.affiliateCode}${data.paymentLinkWarning ? `\n\n${data.paymentLinkWarning}` : ""}`);
+      alert(`Affiliate approved. Stripe coupon code: ${data.affiliateCode}`);
       await loadAdminHub();
     };
     const reject = document.createElement("button");
@@ -3453,57 +3443,6 @@ function renderAffiliateApplications(applications) {
       await loadAdminHub();
     };
     actions.append(approve, reject);
-    row.append(details, actions);
-    panel.append(row);
-  });
-}
-
-function renderApprovedAffiliates(affiliates) {
-  const panel = $("#approvedAffiliatesPanel");
-  panel.replaceChildren();
-  if (!affiliates.length) {
-    panel.textContent = "No approved affiliate codes.";
-    return;
-  }
-  affiliates.forEach((affiliate) => {
-    const row = document.createElement("article");
-    row.className = "admin-hub-item affiliate-application-row";
-    const details = document.createElement("div");
-    const heading = document.createElement("b");
-    heading.textContent = `${affiliate.channelName} · ${affiliate.channelType}`;
-    const email = document.createElement("small");
-    email.textContent = affiliate.email;
-    const code = document.createElement("strong");
-    code.textContent = `Code: ${affiliate.code} · Referrals: ${affiliate.referralCount}`;
-    details.append(heading, email, code);
-    const actions = document.createElement("div");
-    actions.className = "affiliate-application-actions";
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "reject-affiliate";
-    remove.textContent = "Delete code & reset count";
-    remove.onclick = async () => {
-      if (!confirm(`Deactivate ${affiliate.code} for ${affiliate.email} and reset ${affiliate.referralCount} referrals to 0? This cannot be undone.`)) return;
-      remove.disabled = true;
-      try {
-        const response = await apiFetch("/api/admin/affiliate/remove", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ userId: affiliate.userId }),
-        });
-        const data = await response.json().catch(() => ({}));
-        if (!response.ok) {
-          alert(data.error || "Could not remove the affiliate code.");
-          return;
-        }
-        await loadAdminHub();
-      } catch (error) {
-        alert("Could not remove the affiliate code. Please try again.");
-      } finally {
-        remove.disabled = false;
-      }
-    };
-    actions.append(remove);
     row.append(details, actions);
     panel.append(row);
   });
@@ -3579,52 +3518,22 @@ async function handleBanAccountSubmit(event) {
     submit.disabled = false;
   }
 }
-function renderAdminEarnings(data, error) {
-  const panel = $("#adminEarningsPanel");
-  if (!panel) return;
-  panel.replaceChildren();
-  if (error) {
-    panel.textContent = error;
-    return;
-  }
-  const rows = Object.entries(data?.totals || {});
-  const heading = document.createElement("p");
-  heading.textContent = `${data?.testMode ? "TEST MODE · " : ""}Gross paid checkouts before refunds and Stripe fees · updated ${new Date(data.updatedAt).toLocaleString()}`;
-  panel.append(heading);
-  if (!rows.length) {
-    const empty = document.createElement("p");
-    empty.textContent = "No paid D50 Payment Link checkouts found.";
-    panel.append(empty);
-  }
-  for (const [currency, totals] of rows) {
-    const money = (cents) => new Intl.NumberFormat(undefined, {
-      style: "currency", currency,
-    }).format(cents / 100);
-    const line = document.createElement("p");
-    line.textContent = `${currency}: All time ${money(totals.allTime)} · Last 30 days ${money(totals.last30Days)} · ${totals.payments} payments (Premium ${money(totals.personal)}, extra slots ${money(totals.extraSlots)})`;
-    panel.append(line);
-  }
-}
 async function loadAdminHub() {
   if (user?.adminMode !== "master") return;
   $("#adminHubMessage").textContent = "Loading…";
-  const [reportsResponse, bansResponse, codesResponse, premiumCodesResponse, affiliateResponse, earningsResponse, approvedResponse] = await Promise.all([
+  const [reportsResponse, bansResponse, codesResponse, premiumCodesResponse, affiliateResponse] = await Promise.all([
     apiFetch("/api/reports", { cache: "no-store" }),
     apiFetch("/api/admin/reports-bans", { cache: "no-store" }),
     apiFetch("/api/admin/access-codes", { cache: "no-store" }),
     apiFetch("/api/admin/premium-codes", { cache: "no-store" }),
     apiFetch("/api/admin/affiliate/applications", { cache: "no-store" }),
-    apiFetch("/api/admin/earnings", { cache: "no-store" }),
-    apiFetch("/api/admin/affiliate/approved", { cache: "no-store" }),
   ]);
-  const [reports, bansData, codes, premiumCodes, affiliateApplications, earnings, approvedAffiliates] = await Promise.all([
+  const [reports, bansData, codes, premiumCodes, affiliateApplications] = await Promise.all([
     reportsResponse.json().catch(() => []),
     bansResponse.json().catch(() => ({})),
     codesResponse.json().catch(() => []),
     premiumCodesResponse.json().catch(() => []),
     affiliateResponse.json().catch(() => []),
-    earningsResponse.json().catch(() => ({})),
-    approvedResponse.json().catch(() => []),
   ]);
   if (user?.adminMode !== "master" || !$("#adminHubModal")) return;
   if (
@@ -3632,7 +3541,7 @@ async function loadAdminHub() {
     !bansResponse.ok ||
     !codesResponse.ok ||
     !premiumCodesResponse.ok
-    || !affiliateResponse.ok || !approvedResponse.ok
+    || !affiliateResponse.ok
   ) {
     $("#adminHubMessage").textContent =
       bansData.error || "Admin data could not be loaded.";
@@ -3646,8 +3555,6 @@ async function loadAdminHub() {
   renderAffiliateApplications(
     Array.isArray(affiliateApplications) ? affiliateApplications : [],
   );
-  renderApprovedAffiliates(Array.isArray(approvedAffiliates) ? approvedAffiliates : []);
-  renderAdminEarnings(earnings, earningsResponse.ok ? "" : earnings.error || "Earnings could not be loaded.");
   if (managerAccountFilter?.id) {
     const selectedBan = (bansData.bannedUsers || []).find(
       (account) => account.id === managerAccountFilter.id,
@@ -3876,33 +3783,13 @@ $("#freeUploadsButton").onclick = async () => {
 function handlePendingPreviewEnded() {
   stopPendingPreview();
 }
-function renderPartnerDetails() {
-  $("#affiliatePartnerCode").textContent = user?.affiliateCode || "";
-  $("#affiliatePartnerCount").textContent = Number(user?.referralCount || 0).toLocaleString();
-}
-function showPartnerDetails() {
-  if (!user?.isAffiliate || !user.affiliateCode) return;
-  hideModals();
-  renderPartnerDetails();
-  $("#affiliateCopyCode").textContent = "Copy code";
-  $("#affiliatePartnerModal").hidden = false;
-}
-$("#affiliateCopyCode").onclick = () => {
-  if (user?.affiliateCode) copyGroupToken(user.affiliateCode, $("#affiliateCopyCode"));
-};
-async function openAffiliateApplication() {
+function openAffiliateApplication() {
   if (!user) return showAccountGate();
-  try {
-    const response = await apiFetch("/api/auth/me", { cache: "no-store" });
-    if (response.ok) {
-      user = await response.json();
-      updateProfile();
-    }
-  } catch {
-    // The latest known status remains visible during a connection failure.
-  }
   if (user.isAffiliate) {
-    return showPartnerDetails();
+    alert(
+      `Your affiliate code is ${user.affiliateCode}. Referrals: ${Number(user.referralCount || 0)}.`,
+    );
+    return;
   }
   const application = user.affiliateApplication || {};
   if (application.hasApplied && application.status === "pending") {
@@ -3915,8 +3802,8 @@ async function openAffiliateApplication() {
   $("#affiliateRequestedCode").value = application.requestedCode || "";
   $("#affiliateReason").value = application.reason || "";
   $("#affiliateApplicationMessage").textContent =
-    application.status === "rejected" || application.status === "revoked"
-      ? "You can submit a new application for the partner program."
+    application.status === "rejected"
+      ? "Your previous application was rejected. You may submit an updated application."
       : "";
   $("#affiliateApplicationModal").hidden = false;
   $("#affiliateChannelName").focus();
@@ -3955,22 +3842,7 @@ $("#affiliateApplicationForm").onsubmit = async (event) => {
 let reportModeActive = false;
 let reportSelectionLocked = false;
 function startReportMode() {
-  if (reportModeActive) return finishReportMode();
   hideModals();
-  finishBoostMode();
-  reportModeActive = true;
-  reportSelectionLocked = false;
-  document.body.classList.add("report-mode-active");
-  $("#reportModeBadge").hidden = false;
-  $("#reportContentButton").textContent = "Cancel report";
-}
-function openReportForSong(songId) {
-  if (!reportModeActive || reportSelectionLocked) return;
-  reportSelectionLocked = true;
-  reportModeActive = false;
-  document.body.classList.remove("report-mode-active");
-  $("#reportModeBadge").hidden = true;
-  $("#reportContentButton").textContent = "Report";
   const select = $("#reportSongSelect");
   select.replaceChildren(new Option("Select a song…", ""));
   [...songs]
@@ -3978,18 +3850,16 @@ function openReportForSong(songId) {
     .forEach((song) =>
       select.append(new Option(song.title || "Untitled track", song.id)),
     );
-  select.value = songId;
   $("#reportReasonInput").value = "";
   $("#reportSubmitMessage").textContent = "";
   $("#sendReportButton").disabled = true;
   $("#reportSubmitModal").hidden = false;
-  $("#reportReasonInput").focus();
+  select.focus();
 }
 function finishReportMode() {
   reportModeActive = false;
   reportSelectionLocked = false;
   document.body.classList.remove("report-mode-active");
-  $("#reportContentButton").textContent = "Report";
   const badge = $("#reportModeBadge");
   if (badge) badge.hidden = true;
   $("#reportSubmitModal").hidden = true;
@@ -4040,23 +3910,6 @@ $("#reportSubmitForm").onsubmit = async (event) => {
   }
 };
 $("#reportContentButton").onclick = startReportMode;
-document.addEventListener("click", (event) => {
-  if (!reportModeActive) return;
-  const target = event.target.closest('[data-report-id][data-report-type="song"]');
-  if (!target || event.target.closest(".modal, #reportModeBadge")) return;
-  // A user can still press a song's Play control while report mode is on.
-  // Exit report mode and allow the original playback handler to run.
-  if (event.target.closest("button, select, option, input, a")) {
-    finishReportMode();
-    return;
-  }
-  event.preventDefault();
-  event.stopImmediatePropagation();
-  openReportForSong(target.dataset.reportId);
-}, true);
-document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && reportModeActive) finishReportMode();
-});
 $("#cancelReportMode").onclick = finishReportMode;
 $("#reportConfirmationClose").onclick = finishReportMode;
 $("#reportConfirmationDone").onclick = finishReportMode;
@@ -4194,7 +4047,7 @@ function updateProfile() {
   affiliateButton.hidden = user.adminMode === "master";
   affiliateButton.disabled = false;
   affiliateButton.textContent = user.isAffiliate
-    ? `Partner · ${user.affiliateCode} · ${Number(user.referralCount || 0)}`
+    ? `Affiliate · ${user.affiliateCode} · ${Number(user.referralCount || 0)}`
     : user.affiliateApplication?.status === "pending"
       ? "Affiliate Pending"
       : "Affiliate";
@@ -4485,7 +4338,7 @@ $$(".modal-close").forEach(
     (button.onclick =
       button.id === "reportConfirmationClose" ? finishReportMode : hideModals),
 );
-async function requestStripeCheckout(button, purchase, code = "") {
+async function requestStripeCheckout(button, purchase) {
   if (!user) return showAccountGate();
   const originalText = button.textContent;
   button.disabled = true;
@@ -4494,12 +4347,11 @@ async function requestStripeCheckout(button, purchase, code = "") {
     const response = await apiFetch("/api/checkout", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ purchase, code }),
+      body: JSON.stringify({ purchase }),
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok || !data.url) {
-      if (code) $("#affiliateCheckoutMessage").textContent = data.error || "The code could not be applied.";
-      else alert(data.error || "Stripe checkout could not be opened.");
+      alert(data.error || "Stripe checkout could not be opened.");
       return;
     }
     window.location.assign(data.url);
@@ -4513,11 +4365,6 @@ async function requestStripeCheckout(button, purchase, code = "") {
 }
 $("#upgradeNow").onclick = () =>
   requestStripeCheckout($("#upgradeNow"), "personal");
-$("#affiliateCheckoutForm").onsubmit = (event) => {
-  event.preventDefault();
-  $("#affiliateCheckoutMessage").textContent = "";
-  requestStripeCheckout($("#affiliateCheckoutButton"), "personal", $("#affiliateCheckoutCode").value.trim().toUpperCase());
-};
 
 $("#groupBuySlots").onclick = () =>
   requestStripeCheckout($("#groupBuySlots"), "extra_slots");
