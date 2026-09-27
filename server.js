@@ -2489,13 +2489,33 @@ app.post(
         error: "That requested affiliate code is no longer available.",
       });
     try {
+      // A missing coupon is the most common setup error. Check it before
+      // changing either Payment Link so the admin sees an actionable message.
+      try {
+        const coupon = await stripe.coupons.retrieve(STRIPE_AFFILIATE_COUPON_ID);
+        if (!coupon.valid) throw new Error("The configured coupon is no longer valid.");
+      } catch (error) {
+        console.error("Affiliate coupon lookup failed:", error.message);
+        return response.status(503).json({
+          code: "AFFILIATE_COUPON_INVALID",
+          error: `Stripe coupon ${STRIPE_AFFILIATE_COUPON_ID} was not found or is invalid. Check STRIPE_AFFILIATE_COUPON_ID and the Stripe account/mode in Render.`,
+        });
+      }
       for (const paymentLinkId of [
         STRIPE_PAYMENT_LINK_ID,
         STRIPE_DUO_LINK_ID,
       ].filter(Boolean)) {
-        await stripe.paymentLinks.update(paymentLinkId, {
-          allow_promotion_codes: true,
-        });
+        try {
+          await stripe.paymentLinks.update(paymentLinkId, {
+            allow_promotion_codes: true,
+          });
+        } catch (error) {
+          console.error(`Affiliate Payment Link ${paymentLinkId} update failed:`, error.message);
+          return response.status(503).json({
+            code: "AFFILIATE_PAYMENT_LINK_INVALID",
+            error: `Stripe could not enable promotion codes on Payment Link ${paymentLinkId}. Check its ID and account/mode in Render.`,
+          });
+        }
       }
       const promotionCode = await stripe.promotionCodes.create({
         promotion: {
@@ -2530,11 +2550,49 @@ app.post(
         code: codeConflict ? "STRIPE_PROMOTION_CODE_TAKEN" : "STRIPE_ERROR",
         error: codeConflict
           ? "That code already exists in Stripe. Ask the applicant to choose another code."
-          : "Stripe could not create the affiliate Promotion Code.",
+          : `Stripe could not create the affiliate Promotion Code${error.param ? ` (field: ${error.param})` : ""}. Check the Render logs for Stripe's reason.`,
       });
     }
   },
 );
+
+// Gross paid D50 Payment Link checkouts, calculated from Stripe rather than
+// local account records (which do not contain a complete payment history).
+app.get("/api/admin/earnings", auth, masterOnly, async (_request, response) => {
+  if (!stripe || (!STRIPE_PAYMENT_LINK_ID && !STRIPE_DUO_LINK_ID))
+    return response.status(503).json({
+      error: "Stripe and the D50 Payment Link IDs must be configured to show earnings.",
+    });
+  try {
+    const links = new Map([
+      [STRIPE_PAYMENT_LINK_ID, "personal"],
+      [STRIPE_DUO_LINK_ID, "extraSlots"],
+    ].filter(([id]) => id));
+    const totals = {};
+    const since = Math.floor(Date.now() / 1000) - 30 * 24 * 60 * 60;
+    await stripe.checkout.sessions.list({ limit: 100 }).autoPagingEach((session) => {
+      const linkId = typeof session.payment_link === "string"
+        ? session.payment_link : session.payment_link?.id;
+      const kind = links.get(linkId);
+      if (!kind || session.payment_status !== "paid" ||
+          !Number.isSafeInteger(session.amount_total) ||
+          !/^[a-z]{3}$/.test(session.currency || "")) return;
+      const currency = session.currency.toUpperCase();
+      const bucket = totals[currency] ||= {
+        allTime: 0, last30Days: 0, payments: 0,
+        personal: 0, extraSlots: 0,
+      };
+      bucket.allTime += session.amount_total;
+      bucket.payments += 1;
+      bucket[kind] += session.amount_total;
+      if (session.created >= since) bucket.last30Days += session.amount_total;
+    });
+    response.json({ totals, updatedAt: Date.now(), testMode: STRIPE_SECRET_KEY.startsWith("sk_test_") });
+  } catch (error) {
+    console.error("Stripe earnings lookup failed:", error.message);
+    response.status(502).json({ error: "Could not load payments from Stripe. Check the Render logs." });
+  }
+});
 
 app.post(
   "/api/admin/affiliate/reject",
@@ -2598,6 +2656,11 @@ const MASTER_ADMIN_UI_FRAGMENT = `
       <p class="eye">PARTNER PROGRAM</p>
       <h2>Affiliate Applications Queue</h2>
       <div id="affiliateApplicationsPanel" class="admin-hub-panel affiliate-applications-panel"></div>
+    </section>
+    <section class="admin-queue-section">
+      <p class="eye">D50 PAYMENTS</p>
+      <h2>Money made</h2>
+      <div id="adminEarningsPanel" class="admin-hub-panel" aria-live="polite"></div>
     </section>
     <section class="admin-code-generator">
       <p class="eye">SECURE ROLE MANAGEMENT</p>

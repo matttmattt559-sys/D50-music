@@ -3518,22 +3518,50 @@ async function handleBanAccountSubmit(event) {
     submit.disabled = false;
   }
 }
+function renderAdminEarnings(data, error) {
+  const panel = $("#adminEarningsPanel");
+  if (!panel) return;
+  panel.replaceChildren();
+  if (error) {
+    panel.textContent = error;
+    return;
+  }
+  const rows = Object.entries(data?.totals || {});
+  const heading = document.createElement("p");
+  heading.textContent = `${data?.testMode ? "TEST MODE · " : ""}Gross paid checkouts before refunds and Stripe fees · updated ${new Date(data.updatedAt).toLocaleString()}`;
+  panel.append(heading);
+  if (!rows.length) {
+    const empty = document.createElement("p");
+    empty.textContent = "No paid D50 Payment Link checkouts found.";
+    panel.append(empty);
+  }
+  for (const [currency, totals] of rows) {
+    const money = (cents) => new Intl.NumberFormat(undefined, {
+      style: "currency", currency,
+    }).format(cents / 100);
+    const line = document.createElement("p");
+    line.textContent = `${currency}: All time ${money(totals.allTime)} · Last 30 days ${money(totals.last30Days)} · ${totals.payments} payments (Premium ${money(totals.personal)}, extra slots ${money(totals.extraSlots)})`;
+    panel.append(line);
+  }
+}
 async function loadAdminHub() {
   if (user?.adminMode !== "master") return;
   $("#adminHubMessage").textContent = "Loading…";
-  const [reportsResponse, bansResponse, codesResponse, premiumCodesResponse, affiliateResponse] = await Promise.all([
+  const [reportsResponse, bansResponse, codesResponse, premiumCodesResponse, affiliateResponse, earningsResponse] = await Promise.all([
     apiFetch("/api/reports", { cache: "no-store" }),
     apiFetch("/api/admin/reports-bans", { cache: "no-store" }),
     apiFetch("/api/admin/access-codes", { cache: "no-store" }),
     apiFetch("/api/admin/premium-codes", { cache: "no-store" }),
     apiFetch("/api/admin/affiliate/applications", { cache: "no-store" }),
+    apiFetch("/api/admin/earnings", { cache: "no-store" }),
   ]);
-  const [reports, bansData, codes, premiumCodes, affiliateApplications] = await Promise.all([
+  const [reports, bansData, codes, premiumCodes, affiliateApplications, earnings] = await Promise.all([
     reportsResponse.json().catch(() => []),
     bansResponse.json().catch(() => ({})),
     codesResponse.json().catch(() => []),
     premiumCodesResponse.json().catch(() => []),
     affiliateResponse.json().catch(() => []),
+    earningsResponse.json().catch(() => ({})),
   ]);
   if (user?.adminMode !== "master" || !$("#adminHubModal")) return;
   if (
@@ -3555,6 +3583,7 @@ async function loadAdminHub() {
   renderAffiliateApplications(
     Array.isArray(affiliateApplications) ? affiliateApplications : [],
   );
+  renderAdminEarnings(earnings, earningsResponse.ok ? "" : earnings.error || "Earnings could not be loaded.");
   if (managerAccountFilter?.id) {
     const selectedBan = (bansData.bannedUsers || []).find(
       (account) => account.id === managerAccountFilter.id,
