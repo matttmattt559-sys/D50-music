@@ -3421,7 +3421,7 @@ function renderAffiliateApplications(applications) {
         approve.disabled = false;
         return alert(data.error || "The affiliate could not be approved.");
       }
-      alert(`Affiliate approved. Stripe coupon code: ${data.affiliateCode}`);
+      alert(`Affiliate approved. Stripe coupon code: ${data.affiliateCode}${data.paymentLinkWarning ? `\n\n${data.paymentLinkWarning}` : ""}`);
       await loadAdminHub();
     };
     const reject = document.createElement("button");
@@ -4367,7 +4367,7 @@ $$(".modal-close").forEach(
     (button.onclick =
       button.id === "reportConfirmationClose" ? finishReportMode : hideModals),
 );
-async function requestStripeCheckout(button, purchase) {
+async function requestStripeCheckout(button, purchase, code = "") {
   if (!user) return showAccountGate();
   const originalText = button.textContent;
   button.disabled = true;
@@ -4376,11 +4376,12 @@ async function requestStripeCheckout(button, purchase) {
     const response = await apiFetch("/api/checkout", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ purchase }),
+      body: JSON.stringify({ purchase, code }),
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok || !data.url) {
-      alert(data.error || "Stripe checkout could not be opened.");
+      if (code) $("#affiliateCheckoutMessage").textContent = data.error || "The code could not be applied.";
+      else alert(data.error || "Stripe checkout could not be opened.");
       return;
     }
     window.location.assign(data.url);
@@ -4394,6 +4395,11 @@ async function requestStripeCheckout(button, purchase) {
 }
 $("#upgradeNow").onclick = () =>
   requestStripeCheckout($("#upgradeNow"), "personal");
+$("#affiliateCheckoutForm").onsubmit = (event) => {
+  event.preventDefault();
+  $("#affiliateCheckoutMessage").textContent = "";
+  requestStripeCheckout($("#affiliateCheckoutButton"), "personal", $("#affiliateCheckoutCode").value.trim().toUpperCase());
+};
 
 $("#groupBuySlots").onclick = () =>
   requestStripeCheckout($("#groupBuySlots"), "extra_slots");

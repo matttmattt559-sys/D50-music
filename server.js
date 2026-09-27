@@ -1363,6 +1363,20 @@ function promotionCouponId(promotionCode) {
 }
 
 async function recordAffiliateReferral(session, users, purchaserUserId) {
+  // Discounted D50 Checkout Sessions are created server-side with the exact
+  // approved promotion code ID in signed Stripe session metadata.
+  const directPromotionId = session.metadata?.d50_affiliate_promo_id;
+  if (session.metadata?.d50_purchase === "personal_premium" && directPromotionId) {
+    const affiliate = users.find((candidate) => candidate.isAffiliate &&
+      candidate.stripePromotionCodeId === directPromotionId);
+    if (!affiliate || affiliate.id === purchaserUserId) return false;
+    const processed = Array.isArray(affiliate.affiliateReferralSessionIds)
+      ? affiliate.affiliateReferralSessionIds : [];
+    if (processed.includes(session.id)) return false;
+    affiliate.referralCount = Number(affiliate.referralCount || 0) + 1;
+    affiliate.affiliateReferralSessionIds = [...processed, session.id];
+    return true;
+  }
   const promotionCodes = await appliedPromotionCodesForSession(session);
   for (const promotionCode of promotionCodes) {
     if (
@@ -1420,7 +1434,9 @@ app.post(
           : session.payment_link?.id || "";
 
       const isPersonalPayment = Boolean(
-        STRIPE_PAYMENT_LINK_ID && sessionPaymentLinkId === STRIPE_PAYMENT_LINK_ID,
+        (STRIPE_PAYMENT_LINK_ID && sessionPaymentLinkId === STRIPE_PAYMENT_LINK_ID) ||
+        (session.metadata?.d50_purchase === "personal_premium" &&
+          session.metadata?.d50_checkout === "affiliate"),
       );
       const isExtraSlotPayment = Boolean(
         STRIPE_DUO_LINK_ID && sessionPaymentLinkId === STRIPE_DUO_LINK_ID,
@@ -1757,6 +1773,55 @@ app.post("/create-checkout-session", auth, createCheckoutSession);
 app.post("/api/create-checkout-session", auth, createCheckoutSession);
 app.post("/api/checkout", auth, async (request, response) => {
   const purchase = String(request.body.purchase || "personal");
+  const affiliateCode = String(request.body.code || "").trim().toUpperCase();
+  if (purchase !== "extra_slots" && affiliateCode) {
+    if (!/^[A-Z0-9]{3,20}$/.test(affiliateCode))
+      return response.status(400).json({ error: "Enter a valid creator code (3–20 letters or numbers)." });
+    if (!stripe || !STRIPE_AFFILIATE_COUPON_ID || !STRIPE_PAYMENT_LINK_ID ||
+        !/^https:\/\//.test(APP_BASE_URL))
+      return response.status(503).json({ error: "Creator code checkout is not configured yet." });
+    const affiliate = readUsers().find((entry) => entry.isAffiliate &&
+      entry.affiliateCode?.toUpperCase() === affiliateCode &&
+      entry.stripePromotionCodeId);
+    if (!affiliate || affiliate.id === request.user.id)
+      return response.status(400).json({ error: "That creator code is unavailable for this account." });
+    try {
+      const [promotionCode, lineItems, coupon] = await Promise.all([
+        stripe.promotionCodes.retrieve(affiliate.stripePromotionCodeId),
+        stripe.paymentLinks.listLineItems(STRIPE_PAYMENT_LINK_ID, { limit: 2 }),
+        stripe.coupons.retrieve(STRIPE_AFFILIATE_COUPON_ID),
+      ]);
+      const price = lineItems.data[0]?.price;
+      if (!promotionCode.active || promotionCode.valid === false ||
+          promotionCode.code?.toUpperCase() !== affiliateCode ||
+          promotionCouponId(promotionCode) !== STRIPE_AFFILIATE_COUPON_ID ||
+          !coupon.valid || coupon.percent_off !== 20)
+        return response.status(400).json({ error: "That creator code is no longer valid." });
+      if (lineItems.data.length !== 1 || lineItems.data[0].quantity !== 1 ||
+          price?.currency !== "dkk" || price?.unit_amount !== 3600 ||
+          price?.type !== "one_time" || !price?.id)
+        return response.status(503).json({ error: "The 36 DKK Premium price needs to be checked in Stripe." });
+      const session = await stripe.checkout.sessions.create({
+        mode: "payment",
+        line_items: [{ price: price.id, quantity: 1 }],
+        discounts: [{ promotion_code: promotionCode.id }],
+        client_reference_id: request.user.id,
+        customer_email: request.user.email,
+        metadata: {
+          userId: request.user.id,
+          d50_purchase: "personal_premium",
+          d50_checkout: "affiliate",
+          d50_affiliate_promo_id: promotionCode.id,
+        },
+        success_url: `${APP_BASE_URL}/?checkout=success`,
+        cancel_url: `${APP_BASE_URL}/?checkout=cancel`,
+      });
+      return response.json({ product: "personal_premium", url: session.url });
+    } catch (error) {
+      console.error("Affiliate checkout failed:", error.message);
+      return response.status(502).json({ error: "Could not open discounted checkout. Check the code and try again." });
+    }
+  }
   const personalUrl = personalPremiumCheckoutUrl(request.user);
   if (!personalUrl)
     return response.status(503).json({
@@ -2501,22 +2566,6 @@ app.post(
           error: `Stripe coupon ${STRIPE_AFFILIATE_COUPON_ID} was not found or is invalid. Check STRIPE_AFFILIATE_COUPON_ID and the Stripe account/mode in Render.`,
         });
       }
-      for (const paymentLinkId of [
-        STRIPE_PAYMENT_LINK_ID,
-        STRIPE_DUO_LINK_ID,
-      ].filter(Boolean)) {
-        try {
-          await stripe.paymentLinks.update(paymentLinkId, {
-            allow_promotion_codes: true,
-          });
-        } catch (error) {
-          console.error(`Affiliate Payment Link ${paymentLinkId} update failed:`, error.message);
-          return response.status(503).json({
-            code: "AFFILIATE_PAYMENT_LINK_INVALID",
-            error: `Stripe could not enable promotion codes on Payment Link ${paymentLinkId}. Check its ID and account/mode in Render.`,
-          });
-        }
-      }
       const promotionCode = await stripe.promotionCodes.create({
         promotion: {
           type: "coupon",
@@ -2541,7 +2590,26 @@ app.post(
         reviewedBy: request.user.id,
       };
       await writeUsers(users);
-      response.json(publicUser(affiliate));
+      // The discount is for Premium; a second extra-slots link is unrelated.
+      // A Payment Link update failure must not discard a successfully created
+      // promotion code or cause retries to create duplicate Stripe objects.
+      let paymentLinkWarning = "";
+      if (STRIPE_PAYMENT_LINK_ID) {
+        try {
+          const paymentLink = await stripe.paymentLinks.retrieve(STRIPE_PAYMENT_LINK_ID);
+          if (!paymentLink.allow_promotion_codes) {
+            await stripe.paymentLinks.update(STRIPE_PAYMENT_LINK_ID, {
+              allow_promotion_codes: true,
+            });
+          }
+        } catch (error) {
+          console.error(`Affiliate Payment Link ${STRIPE_PAYMENT_LINK_ID} update failed:`, error.message);
+          paymentLinkWarning = `Code created. Stripe could not enable code entry on the Payment Link: ${error.message}. Buyers can use this code in D50's Upgrade to Premium popup.`;
+        }
+      } else {
+        paymentLinkWarning = "Code created, but STRIPE_PAYMENT_LINK_ID is missing. Configure the Premium Payment Link before buyers use this code.";
+      }
+      response.json({ ...publicUser(affiliate), paymentLinkWarning });
     } catch (error) {
       console.error("Affiliate approval failed:", error.message);
       const codeConflict =
@@ -2550,7 +2618,7 @@ app.post(
         code: codeConflict ? "STRIPE_PROMOTION_CODE_TAKEN" : "STRIPE_ERROR",
         error: codeConflict
           ? "That code already exists in Stripe. Ask the applicant to choose another code."
-          : `Stripe could not create the affiliate Promotion Code${error.param ? ` (field: ${error.param})` : ""}. Check the Render logs for Stripe's reason.`,
+          : `Stripe could not create the affiliate Promotion Code: ${error.message || "Unknown Stripe error"}.`,
       });
     }
   },
@@ -2573,7 +2641,9 @@ app.get("/api/admin/earnings", auth, masterOnly, async (_request, response) => {
     await stripe.checkout.sessions.list({ limit: 100 }).autoPagingEach((session) => {
       const linkId = typeof session.payment_link === "string"
         ? session.payment_link : session.payment_link?.id;
-      const kind = links.get(linkId);
+      const kind = links.get(linkId) ||
+        (session.metadata?.d50_purchase === "personal_premium" &&
+         session.metadata?.d50_checkout === "affiliate" ? "personal" : null);
       if (!kind || session.payment_status !== "paid" ||
           !Number.isSafeInteger(session.amount_total) ||
           !/^[a-z]{3}$/.test(session.currency || "")) return;

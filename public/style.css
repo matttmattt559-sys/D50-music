@@ -5251,3 +5251,8 @@ button {
     height: 102px;
   }
 }
+.affiliate-checkout-form { margin-top: 18px; display: grid; gap: 9px; }
+.affiliate-checkout-form label { font-size: 0.9rem; font-weight: 600; }
+.affiliate-checkout-controls { display: flex; flex-wrap: wrap; gap: 9px; }
+.affiliate-checkout-controls input { min-width: 130px; flex: 1 1 130px; border: 1px solid #615a71; border-radius: 9px; background: #161020; color: #fff; padding: 11px; }
+.affiliate-checkout-controls button { flex: 1 1 auto; }

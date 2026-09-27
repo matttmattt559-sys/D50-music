@@ -13,7 +13,7 @@
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" href="/icons/d50-icon-192.png" sizes="192x192" />
     <link rel="apple-touch-icon" href="/icons/d50-icon-180.png" sizes="180x180" />
-    <link rel="stylesheet" href="style.css?v=20260927-affiliate-code-16" />
+    <link rel="stylesheet" href="style.css?v=20260927-affiliate-checkout-17" />
     <link rel="stylesheet" href="group-subscription.css?v=20260920-1" />
   </head>
   <body class="dashboard-active main-app-container">
@@ -443,7 +443,15 @@
           You've reached your free limit. Upgrade to Premium to unlock unlimited
           listening, liking, and uploading!
         </p>
-        <button id="upgradeNow" class="primary-button">Pay for Premium</button>
+        <button id="upgradeNow" class="primary-button" type="button">Pay 36 DKK for Premium</button>
+        <form id="affiliateCheckoutForm" class="affiliate-checkout-form">
+          <label for="affiliateCheckoutCode">Have a creator code? Get 20% off</label>
+          <div class="affiliate-checkout-controls">
+            <input id="affiliateCheckoutCode" name="code" maxlength="20" pattern="[A-Za-z0-9]{3,20}" autocomplete="off" placeholder="Enter code" required />
+            <button id="affiliateCheckoutButton" type="submit" class="primary-button">Apply &amp; pay 28.80 DKK</button>
+          </div>
+          <p id="affiliateCheckoutMessage" class="form-message" role="status"></p>
+        </form>
       </div>
     </div>
     <div id="groupSubscriptionModal" class="modal" hidden>
@@ -666,6 +674,6 @@
       </div>
     </div>
     <script src="pwa.js?v=20260921-pwa-1"></script>
-    <script src="script.js?v=20260927-affiliate-code-16"></script>
+    <script src="script.js?v=20260927-affiliate-checkout-17"></script>
   </body>
 </html>
