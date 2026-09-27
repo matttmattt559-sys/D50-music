@@ -1545,7 +1545,7 @@ app.use((request, response, next) => {
   response.setHeader("Referrer-Policy", "no-referrer");
   response.setHeader(
     "Content-Security-Policy",
-    "default-src 'self'; script-src 'self' https://js.stripe.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://*.stripe.com https://*.r2.dev; media-src 'self' https://*.r2.dev; connect-src 'self' https://api.stripe.com; frame-src https://js.stripe.com https://hooks.stripe.com; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
+    "default-src 'self'; script-src 'self' https://js.stripe.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://*.stripe.com https://*.r2.dev https://res.cloudinary.com; media-src 'self' https://*.r2.dev https://res.cloudinary.com; connect-src 'self' https://api.stripe.com; frame-src https://js.stripe.com https://hooks.stripe.com; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
   );
   if (
     request.path === "/" ||
