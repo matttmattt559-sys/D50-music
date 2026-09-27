@@ -23,7 +23,6 @@ let managerCategoryPriority = null;
 let pendingUploads = [];
 let pendingUploadsLoading = false;
 let pendingPreviewId = null;
-let pendingPreviewSnapshot = null;
 const SONG_PAGE_SIZE = 20;
 let songPage = 0;
 let songsHaveMore = false;
@@ -514,11 +513,23 @@ async function flushLikeUpdate(key) {
   const path = state.type === "song"
     ? `/api/songs/${state.item.id}/like`
     : `/api/categories/${state.item.id}/like`;
-  const response = await apiFetch(path, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ liked: sentLiked }),
-  });
+  let response;
+  try {
+    response = await apiFetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ liked: sentLiked }),
+    });
+  } catch (error) {
+    state.item.liked = state.confirmedLiked;
+    state.item.likedCount = state.confirmedCount;
+    state.type === "song"
+      ? updateSongLikeElements(state.item)
+      : updateCategoryLikeElements(state.item);
+    pendingLikeUpdates.delete(key);
+    alert("The like could not be saved. Check your connection and try again.");
+    return;
+  }
   if (!response.ok) {
     state.item.liked = state.confirmedLiked;
     state.item.likedCount = state.confirmedCount;
@@ -625,10 +636,18 @@ function startSongAudio(s, scope, scopeName, preservedUpcoming) {
   // This is important for iOS/WebKit when advancing while the screen is locked.
   const playback = audio.play();
   if (playback?.catch)
-    playback.catch((error) =>
-      console.warn("Background playback could not start:", error.message),
-    );
+    playback.catch((error) => {
+      console.warn("Song playback could not start:", s.url, error.message);
+      if (currentId === s.id)
+        $("#now").textContent = `Cannot play ${s.title} — check the audio file`;
+    });
 }
+audio.addEventListener("error", () => {
+  const song = active();
+  if (!song) return;
+  console.error("Song audio could not load:", song.url, audio.error?.code);
+  $("#now").textContent = `Cannot play ${song.title} — check the audio file`;
+});
 
 async function play(
   s,
@@ -648,9 +667,16 @@ async function play(
     localStorage.setItem("d50_guest_listens", String(guestListenCount));
     updateGuestProfile();
   } else {
-    const permission = await apiFetch("/api/listens/" + s.id, {
-      method: "POST",
-    });
+    let permission;
+    try {
+      permission = await apiFetch("/api/listens/" + s.id, {
+        method: "POST",
+      });
+    } catch (error) {
+      if (immediateBackgroundTransition) audio.pause();
+      alert("The listening request failed. Check your connection and try again.");
+      return;
+    }
     if (!permission.ok) {
       if (immediateBackgroundTransition) audio.pause();
       return handleLocked(permission);
@@ -1028,10 +1054,20 @@ async function syncCreatorStats() {
       const permissionsChanged =
         user.canManage !== latestProfile.canManage ||
         user.banned !== latestProfile.banned;
+      const partnerChanged =
+        user.isAffiliate !== latestProfile.isAffiliate ||
+        user.affiliateCode !== latestProfile.affiliateCode ||
+        user.referralCount !== latestProfile.referralCount ||
+        user.affiliateApplication?.status !== latestProfile.affiliateApplication?.status;
+      const newlyApproved = !user.isAffiliate && latestProfile.isAffiliate;
       Object.assign(user, latestProfile);
       renderBoostMilestones();
       renderFreeUploadCapacity();
-      if (permissionsChanged) updateProfile();
+      if (permissionsChanged || partnerChanged) updateProfile();
+      if (partnerChanged && !$("#affiliatePartnerModal").hidden)
+        renderPartnerDetails();
+      if (newlyApproved && !document.querySelector(".modal:not([hidden])"))
+        showPartnerDetails();
     }
     let requiresRender = false;
     latestSongs.forEach((latest) => {
@@ -1184,7 +1220,8 @@ $("#clearManagerAccountFilter").onclick = () => {
 };
 let adminUiPromise = null;
 function purgeAdminUi() {
-  if (pendingPreviewId) stopPendingPreview();
+  const previewAudio = $("#pendingPreviewAudio");
+  if (previewAudio) previewAudio.pause();
   ["adminHubModal", "freeUploadsModal", "banAccountModal"].forEach((id) =>
     document.getElementById(id)?.remove(),
   );
@@ -1196,12 +1233,14 @@ function bindAdminUi() {
   const premiumCodeForm = $("#premiumCodeForm");
   const manualBan = $("#manualBanButton");
   const banForm = $("#banAccountForm");
-  if (!codeForm || !premiumCodeForm || !manualBan || !banForm)
+  const previewAudio = $("#pendingPreviewAudio");
+  if (!codeForm || !premiumCodeForm || !manualBan || !banForm || !previewAudio)
     return false;
   codeForm.onsubmit = handleAdminCodeSubmit;
   premiumCodeForm.onsubmit = handlePremiumCodeSubmit;
   manualBan.onclick = () => openBanAccountModal();
   banForm.onsubmit = handleBanAccountSubmit;
+  previewAudio.addEventListener("ended", handlePendingPreviewEnded);
   $$("#adminHubModal .modal-close, #freeUploadsModal .modal-close, #banAccountModal .modal-close").forEach(
     (button) => (button.onclick = purgeAdminUi),
   );
@@ -2523,10 +2562,6 @@ audio.addEventListener("pause", () => {
 });
 audio.addEventListener("ended", updatePlayButton);
 audio.addEventListener("ended", () => {
-  if (pendingPreviewId) {
-    handlePendingPreviewEnded();
-    return;
-  }
   if (!user) {
     guestPreviewActive = false;
     if (guestListenCount >= 5) showAccountGate();
@@ -3421,7 +3456,7 @@ function renderAffiliateApplications(applications) {
         approve.disabled = false;
         return alert(data.error || "The affiliate could not be approved.");
       }
-      alert(`Affiliate approved. Stripe coupon code: ${data.affiliateCode}`);
+      alert(`Affiliate approved. Stripe coupon code: ${data.affiliateCode}${data.paymentLinkWarning ? `\n\n${data.paymentLinkWarning}` : ""}`);
       await loadAdminHub();
     };
     const reject = document.createElement("button");
@@ -3443,6 +3478,57 @@ function renderAffiliateApplications(applications) {
       await loadAdminHub();
     };
     actions.append(approve, reject);
+    row.append(details, actions);
+    panel.append(row);
+  });
+}
+
+function renderApprovedAffiliates(affiliates) {
+  const panel = $("#approvedAffiliatesPanel");
+  panel.replaceChildren();
+  if (!affiliates.length) {
+    panel.textContent = "No approved affiliate codes.";
+    return;
+  }
+  affiliates.forEach((affiliate) => {
+    const row = document.createElement("article");
+    row.className = "admin-hub-item affiliate-application-row";
+    const details = document.createElement("div");
+    const heading = document.createElement("b");
+    heading.textContent = `${affiliate.channelName} · ${affiliate.channelType}`;
+    const email = document.createElement("small");
+    email.textContent = affiliate.email;
+    const code = document.createElement("strong");
+    code.textContent = `Code: ${affiliate.code} · Referrals: ${affiliate.referralCount}`;
+    details.append(heading, email, code);
+    const actions = document.createElement("div");
+    actions.className = "affiliate-application-actions";
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "reject-affiliate";
+    remove.textContent = "Delete code & reset count";
+    remove.onclick = async () => {
+      if (!confirm(`Deactivate ${affiliate.code} for ${affiliate.email} and reset ${affiliate.referralCount} referrals to 0? This cannot be undone.`)) return;
+      remove.disabled = true;
+      try {
+        const response = await apiFetch("/api/admin/affiliate/remove", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ userId: affiliate.userId }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          alert(data.error || "Could not remove the affiliate code.");
+          return;
+        }
+        await loadAdminHub();
+      } catch (error) {
+        alert("Could not remove the affiliate code. Please try again.");
+      } finally {
+        remove.disabled = false;
+      }
+    };
+    actions.append(remove);
     row.append(details, actions);
     panel.append(row);
   });
@@ -3518,22 +3604,52 @@ async function handleBanAccountSubmit(event) {
     submit.disabled = false;
   }
 }
+function renderAdminEarnings(data, error) {
+  const panel = $("#adminEarningsPanel");
+  if (!panel) return;
+  panel.replaceChildren();
+  if (error) {
+    panel.textContent = error;
+    return;
+  }
+  const rows = Object.entries(data?.totals || {});
+  const heading = document.createElement("p");
+  heading.textContent = `${data?.testMode ? "TEST MODE · " : ""}Gross paid checkouts before refunds and Stripe fees · updated ${new Date(data.updatedAt).toLocaleString()}`;
+  panel.append(heading);
+  if (!rows.length) {
+    const empty = document.createElement("p");
+    empty.textContent = "No paid D50 Payment Link checkouts found.";
+    panel.append(empty);
+  }
+  for (const [currency, totals] of rows) {
+    const money = (cents) => new Intl.NumberFormat(undefined, {
+      style: "currency", currency,
+    }).format(cents / 100);
+    const line = document.createElement("p");
+    line.textContent = `${currency}: All time ${money(totals.allTime)} · Last 30 days ${money(totals.last30Days)} · ${totals.payments} payments (Premium ${money(totals.personal)}, extra slots ${money(totals.extraSlots)})`;
+    panel.append(line);
+  }
+}
 async function loadAdminHub() {
   if (user?.adminMode !== "master") return;
   $("#adminHubMessage").textContent = "Loading…";
-  const [reportsResponse, bansResponse, codesResponse, premiumCodesResponse, affiliateResponse] = await Promise.all([
+  const [reportsResponse, bansResponse, codesResponse, premiumCodesResponse, affiliateResponse, earningsResponse, approvedResponse] = await Promise.all([
     apiFetch("/api/reports", { cache: "no-store" }),
     apiFetch("/api/admin/reports-bans", { cache: "no-store" }),
     apiFetch("/api/admin/access-codes", { cache: "no-store" }),
     apiFetch("/api/admin/premium-codes", { cache: "no-store" }),
     apiFetch("/api/admin/affiliate/applications", { cache: "no-store" }),
+    apiFetch("/api/admin/earnings", { cache: "no-store" }),
+    apiFetch("/api/admin/affiliate/approved", { cache: "no-store" }),
   ]);
-  const [reports, bansData, codes, premiumCodes, affiliateApplications] = await Promise.all([
+  const [reports, bansData, codes, premiumCodes, affiliateApplications, earnings, approvedAffiliates] = await Promise.all([
     reportsResponse.json().catch(() => []),
     bansResponse.json().catch(() => ({})),
     codesResponse.json().catch(() => []),
     premiumCodesResponse.json().catch(() => []),
     affiliateResponse.json().catch(() => []),
+    earningsResponse.json().catch(() => ({})),
+    approvedResponse.json().catch(() => []),
   ]);
   if (user?.adminMode !== "master" || !$("#adminHubModal")) return;
   if (
@@ -3541,7 +3657,7 @@ async function loadAdminHub() {
     !bansResponse.ok ||
     !codesResponse.ok ||
     !premiumCodesResponse.ok
-    || !affiliateResponse.ok
+    || !affiliateResponse.ok || !approvedResponse.ok
   ) {
     $("#adminHubMessage").textContent =
       bansData.error || "Admin data could not be loaded.";
@@ -3555,6 +3671,8 @@ async function loadAdminHub() {
   renderAffiliateApplications(
     Array.isArray(affiliateApplications) ? affiliateApplications : [],
   );
+  renderApprovedAffiliates(Array.isArray(approvedAffiliates) ? approvedAffiliates : []);
+  renderAdminEarnings(earnings, earningsResponse.ok ? "" : earnings.error || "Earnings could not be loaded.");
   if (managerAccountFilter?.id) {
     const selectedBan = (bansData.bannedUsers || []).find(
       (account) => account.id === managerAccountFilter.id,
@@ -3577,59 +3695,19 @@ function updateFreeUploadsCount() {
   $("#freeUploadsCount").textContent = String(pendingUploads.length);
 }
 function startPendingPreview(track) {
-  if (!pendingPreviewSnapshot) {
-    pendingPreviewSnapshot = {
-      src: audio.currentSrc || audio.src || "",
-      currentTime: Number(audio.currentTime || 0),
-      wasPlaying: !audio.paused,
-      currentId,
-      queue: [...queue],
-      queueScope,
-      nextUpIds: [...nextUpIds],
-    };
-  }
-  audio.pause();
+  const previewAudio = $("#pendingPreviewAudio");
+  if (!previewAudio) return Promise.reject(new Error("Preview player unavailable"));
+  previewAudio.pause();
+  previewAudio.src = track.url;
   pendingPreviewId = track.id;
-  currentId = null;
-  audio.src = track.url;
-  $("#now").textContent = `Preview: ${track.title || "Untitled track"}`;
-  updateActiveSong();
-  heart();
   renderPendingUploads();
-  return audio.play();
+  return previewAudio.play();
 }
 
 function stopPendingPreview() {
-  if (!pendingPreviewId && !pendingPreviewSnapshot) return;
-  audio.pause();
+  const previewAudio = $("#pendingPreviewAudio");
+  if (previewAudio) previewAudio.pause();
   pendingPreviewId = null;
-  const snapshot = pendingPreviewSnapshot;
-  pendingPreviewSnapshot = null;
-  if (!snapshot) return;
-  currentId = snapshot.currentId;
-  queue = snapshot.queue;
-  queueScope = snapshot.queueScope;
-  nextUpIds = snapshot.nextUpIds;
-  if (snapshot.src) {
-    audio.src = snapshot.src;
-    const restorePosition = () => {
-      if (Number.isFinite(snapshot.currentTime))
-        audio.currentTime = Math.min(
-          snapshot.currentTime,
-          audio.duration || snapshot.currentTime,
-        );
-      if (snapshot.wasPlaying) audio.play().catch(() => {});
-    };
-    if (audio.readyState >= 1) restorePosition();
-    else audio.addEventListener("loadedmetadata", restorePosition, { once: true });
-  } else {
-    audio.removeAttribute("src");
-    audio.load();
-  }
-  $("#now").textContent = active()?.title || "Choose a song";
-  fillNextUp(snapshot.nextUpIds);
-  updateActiveSong();
-  heart();
   const modal = $("#freeUploadsModal");
   if (modal && !modal.hidden) renderPendingUploads();
 }
@@ -3783,13 +3861,33 @@ $("#freeUploadsButton").onclick = async () => {
 function handlePendingPreviewEnded() {
   stopPendingPreview();
 }
-function openAffiliateApplication() {
+function renderPartnerDetails() {
+  $("#affiliatePartnerCode").textContent = user?.affiliateCode || "";
+  $("#affiliatePartnerCount").textContent = Number(user?.referralCount || 0).toLocaleString();
+}
+function showPartnerDetails() {
+  if (!user?.isAffiliate || !user.affiliateCode) return;
+  hideModals();
+  renderPartnerDetails();
+  $("#affiliateCopyCode").textContent = "Copy code";
+  $("#affiliatePartnerModal").hidden = false;
+}
+$("#affiliateCopyCode").onclick = () => {
+  if (user?.affiliateCode) copyGroupToken(user.affiliateCode, $("#affiliateCopyCode"));
+};
+async function openAffiliateApplication() {
   if (!user) return showAccountGate();
+  try {
+    const response = await apiFetch("/api/auth/me", { cache: "no-store" });
+    if (response.ok) {
+      user = await response.json();
+      updateProfile();
+    }
+  } catch {
+    // The latest known status remains visible during a connection failure.
+  }
   if (user.isAffiliate) {
-    alert(
-      `Your affiliate code is ${user.affiliateCode}. Referrals: ${Number(user.referralCount || 0)}.`,
-    );
-    return;
+    return showPartnerDetails();
   }
   const application = user.affiliateApplication || {};
   if (application.hasApplied && application.status === "pending") {
@@ -3802,8 +3900,8 @@ function openAffiliateApplication() {
   $("#affiliateRequestedCode").value = application.requestedCode || "";
   $("#affiliateReason").value = application.reason || "";
   $("#affiliateApplicationMessage").textContent =
-    application.status === "rejected"
-      ? "Your previous application was rejected. You may submit an updated application."
+    application.status === "rejected" || application.status === "revoked"
+      ? "You can submit a new application for the partner program."
       : "";
   $("#affiliateApplicationModal").hidden = false;
   $("#affiliateChannelName").focus();
@@ -3842,7 +3940,22 @@ $("#affiliateApplicationForm").onsubmit = async (event) => {
 let reportModeActive = false;
 let reportSelectionLocked = false;
 function startReportMode() {
+  if (reportModeActive) return finishReportMode();
   hideModals();
+  finishBoostMode();
+  reportModeActive = true;
+  reportSelectionLocked = false;
+  document.body.classList.add("report-mode-active");
+  $("#reportModeBadge").hidden = false;
+  $("#reportContentButton").textContent = "Cancel report";
+}
+function openReportForSong(songId) {
+  if (!reportModeActive || reportSelectionLocked) return;
+  reportSelectionLocked = true;
+  reportModeActive = false;
+  document.body.classList.remove("report-mode-active");
+  $("#reportModeBadge").hidden = true;
+  $("#reportContentButton").textContent = "Report";
   const select = $("#reportSongSelect");
   select.replaceChildren(new Option("Select a song…", ""));
   [...songs]
@@ -3850,16 +3963,18 @@ function startReportMode() {
     .forEach((song) =>
       select.append(new Option(song.title || "Untitled track", song.id)),
     );
+  select.value = songId;
   $("#reportReasonInput").value = "";
   $("#reportSubmitMessage").textContent = "";
   $("#sendReportButton").disabled = true;
   $("#reportSubmitModal").hidden = false;
-  select.focus();
+  $("#reportReasonInput").focus();
 }
 function finishReportMode() {
   reportModeActive = false;
   reportSelectionLocked = false;
   document.body.classList.remove("report-mode-active");
+  $("#reportContentButton").textContent = "Report";
   const badge = $("#reportModeBadge");
   if (badge) badge.hidden = true;
   $("#reportSubmitModal").hidden = true;
@@ -3910,6 +4025,23 @@ $("#reportSubmitForm").onsubmit = async (event) => {
   }
 };
 $("#reportContentButton").onclick = startReportMode;
+document.addEventListener("click", (event) => {
+  if (!reportModeActive) return;
+  const target = event.target.closest('[data-report-id][data-report-type="song"]');
+  if (!target || event.target.closest(".modal, #reportModeBadge")) return;
+  // A user can still press a song's Play control while report mode is on.
+  // Exit report mode and allow the original playback handler to run.
+  if (event.target.closest("button, select, option, input, a")) {
+    finishReportMode();
+    return;
+  }
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  openReportForSong(target.dataset.reportId);
+}, true);
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && reportModeActive) finishReportMode();
+});
 $("#cancelReportMode").onclick = finishReportMode;
 $("#reportConfirmationClose").onclick = finishReportMode;
 $("#reportConfirmationDone").onclick = finishReportMode;
@@ -4047,7 +4179,7 @@ function updateProfile() {
   affiliateButton.hidden = user.adminMode === "master";
   affiliateButton.disabled = false;
   affiliateButton.textContent = user.isAffiliate
-    ? `Affiliate · ${user.affiliateCode} · ${Number(user.referralCount || 0)}`
+    ? `Partner · ${user.affiliateCode} · ${Number(user.referralCount || 0)}`
     : user.affiliateApplication?.status === "pending"
       ? "Affiliate Pending"
       : "Affiliate";
@@ -4338,7 +4470,7 @@ $$(".modal-close").forEach(
     (button.onclick =
       button.id === "reportConfirmationClose" ? finishReportMode : hideModals),
 );
-async function requestStripeCheckout(button, purchase) {
+async function requestStripeCheckout(button, purchase, code = "") {
   if (!user) return showAccountGate();
   const originalText = button.textContent;
   button.disabled = true;
@@ -4347,11 +4479,12 @@ async function requestStripeCheckout(button, purchase) {
     const response = await apiFetch("/api/checkout", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ purchase }),
+      body: JSON.stringify({ purchase, code }),
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok || !data.url) {
-      alert(data.error || "Stripe checkout could not be opened.");
+      if (code) $("#affiliateCheckoutMessage").textContent = data.error || "The code could not be applied.";
+      else alert(data.error || "Stripe checkout could not be opened.");
       return;
     }
     window.location.assign(data.url);
@@ -4365,6 +4498,11 @@ async function requestStripeCheckout(button, purchase) {
 }
 $("#upgradeNow").onclick = () =>
   requestStripeCheckout($("#upgradeNow"), "personal");
+$("#affiliateCheckoutForm").onsubmit = (event) => {
+  event.preventDefault();
+  $("#affiliateCheckoutMessage").textContent = "";
+  requestStripeCheckout($("#affiliateCheckoutButton"), "personal", $("#affiliateCheckoutCode").value.trim().toUpperCase());
+};
 
 $("#groupBuySlots").onclick = () =>
   requestStripeCheckout($("#groupBuySlots"), "extra_slots");
