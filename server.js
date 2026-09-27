@@ -956,6 +956,7 @@ function publicUser(user) {
         : "pending",
       channelName: application.channelName || "",
       channelType: application.channelType || "",
+      requestedCode: application.requestedCode || "",
       reason: application.reason || "",
     },
     createdAt: user.createdAt,
@@ -1356,9 +1357,19 @@ async function appliedPromotionCodesForSession(session) {
   return promotionCodes;
 }
 
-async function recordAffiliateReferral(session, users) {
+function promotionCouponId(promotionCode) {
+  const coupon = promotionCode?.promotion?.coupon || promotionCode?.coupon;
+  return typeof coupon === "string" ? coupon : coupon?.id || "";
+}
+
+async function recordAffiliateReferral(session, users, purchaserUserId) {
   const promotionCodes = await appliedPromotionCodesForSession(session);
   for (const promotionCode of promotionCodes) {
+    if (
+      STRIPE_AFFILIATE_COUPON_ID &&
+      promotionCouponId(promotionCode) !== STRIPE_AFFILIATE_COUPON_ID
+    )
+      continue;
     const code = String(promotionCode.code || "").trim().toUpperCase();
     const affiliate = users.find(
       (candidate) =>
@@ -1369,6 +1380,7 @@ async function recordAffiliateReferral(session, users) {
             String(candidate.affiliateCode).toUpperCase() === code)),
     );
     if (!affiliate) continue;
+    if (affiliate.id === purchaserUserId) return false;
     const processed = Array.isArray(affiliate.affiliateReferralSessionIds)
       ? affiliate.affiliateReferralSessionIds
       : [];
@@ -1432,10 +1444,6 @@ app.post(
       }
 
       const users = readUsers();
-      const affiliateReferralRecorded = await recordAffiliateReferral(
-        session,
-        users,
-      );
       const user =
         users.find((item) => referencedUserId && item.id === referencedUserId) ||
         users.find(
@@ -1444,7 +1452,6 @@ app.post(
             String(item.email || "").toLowerCase() === customerEmail,
         );
       if (!user) {
-        if (affiliateReferralRecorded) await writeUsers(users);
         console.error(
           `Stripe payment received for unknown user: ${referencedUserId || customerEmail || "missing reference"}`,
         );
@@ -1461,7 +1468,7 @@ app.post(
         )
           ? user.stripeDuoCheckoutSessionIds
           : [];
-        let usersChanged = affiliateReferralRecorded;
+        let usersChanged = false;
         if (!processedSlotSessions.includes(session.id)) {
           const code = await createUniquePaidFamilyToken(users);
           user.familyInvitationTokens = [
@@ -1488,7 +1495,7 @@ app.post(
       const processedSessions = Array.isArray(user.stripeCheckoutSessionIds)
         ? user.stripeCheckoutSessionIds
         : [];
-      let usersChanged = affiliateReferralRecorded;
+      let usersChanged = false;
       if (!processedSessions.includes(session.id)) {
         const paidAt = Date.now();
         user.paid = true;
@@ -1503,6 +1510,9 @@ app.post(
         user.subscriptionCancelledAt = null;
         user.subscriptionAccessEndsAt = null;
         user.stripeCheckoutSessionIds = [...processedSessions, session.id];
+        // Count the affiliate only after a paid personal-plan checkout has
+        // successfully granted this buyer the complete 30-day Premium period.
+        await recordAffiliateReferral(session, users, user.id);
         usersChanged = true;
       }
       if (usersChanged) await writeUsers(users);
@@ -1678,6 +1688,7 @@ app.post("/api/auth/signup", async (request, response) => {
       status: "pending",
       channelName: "",
       channelType: "",
+      requestedCode: "",
       reason: "",
     },
   };
@@ -2327,6 +2338,9 @@ app.post("/api/admin/unlock", auth, async (request, response) => {
 app.post("/api/affiliate/apply", auth, async (request, response) => {
   const channelName = sanitizeText(request.body.channelName, 100);
   const channelType = sanitizeText(request.body.channelType, 30).toLowerCase();
+  const requestedCode = String(request.body.requestedCode || "")
+    .trim()
+    .toUpperCase();
   const reason = sanitizeText(request.body.reason, 500);
   const allowedChannelTypes = new Set([
     "youtube",
@@ -2336,9 +2350,15 @@ app.post("/api/affiliate/apply", auth, async (request, response) => {
     "podcast",
     "other",
   ]);
-  if (!channelName || !allowedChannelTypes.has(channelType) || !reason)
+  if (
+    !channelName ||
+    !allowedChannelTypes.has(channelType) ||
+    !/^[A-Z0-9]{3,20}$/.test(requestedCode) ||
+    !reason
+  )
     return response.status(400).json({
-      error: "Enter a channel name, channel type, and application reason.",
+      error:
+        "Enter a channel name, channel type, requested code, and application reason. Codes must contain 3–20 letters or numbers.",
     });
   const users = readUsers();
   const applicant = users.find((entry) => entry.id === request.user.id);
@@ -2357,11 +2377,25 @@ app.post("/api/affiliate/apply", auth, async (request, response) => {
       code: "APPLICATION_PENDING",
       error: "Your affiliate application is already pending.",
     });
+  const codeTaken = users.some(
+    (entry) =>
+      entry.id !== applicant.id &&
+      (String(entry.affiliateCode || "").toUpperCase() === requestedCode ||
+        (entry.affiliateApplication?.status === "pending" &&
+          String(entry.affiliateApplication?.requestedCode || "").toUpperCase() ===
+            requestedCode)),
+  );
+  if (codeTaken)
+    return response.status(409).json({
+      code: "AFFILIATE_CODE_TAKEN",
+      error: "That affiliate code has already been requested or approved.",
+    });
   applicant.affiliateApplication = {
     hasApplied: true,
     status: "pending",
     channelName,
     channelType,
+    requestedCode,
     reason,
     appliedAt: Date.now(),
   };
@@ -2411,6 +2445,7 @@ app.get(
           email: entry.email,
           channelName: entry.affiliateApplication.channelName,
           channelType: entry.affiliateApplication.channelType,
+          requestedCode: entry.affiliateApplication.requestedCode || "",
           reason: entry.affiliateApplication.reason,
           appliedAt: entry.affiliateApplication.appliedAt || null,
         }))
@@ -2436,7 +2471,23 @@ app.post(
       return response.status(404).json({
         error: "Pending affiliate application not found.",
       });
-    const code = uniqueAffiliateCode(affiliate, users);
+    const requestedCode = String(
+      affiliate.affiliateApplication.requestedCode || "",
+    ).toUpperCase();
+    const code = /^[A-Z0-9]{3,20}$/.test(requestedCode)
+      ? requestedCode
+      : uniqueAffiliateCode(affiliate, users);
+    if (
+      users.some(
+        (entry) =>
+          entry.id !== affiliate.id &&
+          String(entry.affiliateCode || "").toUpperCase() === code,
+      )
+    )
+      return response.status(409).json({
+        code: "AFFILIATE_CODE_TAKEN",
+        error: "That requested affiliate code is no longer available.",
+      });
     try {
       for (const paymentLinkId of [
         STRIPE_PAYMENT_LINK_ID,
@@ -2473,8 +2524,13 @@ app.post(
       response.json(publicUser(affiliate));
     } catch (error) {
       console.error("Affiliate approval failed:", error.message);
-      response.status(502).json({
-        error: "Stripe could not create the affiliate Promotion Code.",
+      const codeConflict =
+        error.code === "resource_already_exists" || error.param === "code";
+      response.status(codeConflict ? 409 : 502).json({
+        code: codeConflict ? "STRIPE_PROMOTION_CODE_TAKEN" : "STRIPE_ERROR",
+        error: codeConflict
+          ? "That code already exists in Stripe. Ask the applicant to choose another code."
+          : "Stripe could not create the affiliate Promotion Code.",
       });
     }
   },

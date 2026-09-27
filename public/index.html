@@ -13,7 +13,7 @@
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" href="/icons/d50-icon-192.png" sizes="192x192" />
     <link rel="apple-touch-icon" href="/icons/d50-icon-180.png" sizes="180x180" />
-    <link rel="stylesheet" href="style.css?v=20260927-affiliate-login-15" />
+    <link rel="stylesheet" href="style.css?v=20260927-affiliate-code-16" />
     <link rel="stylesheet" href="group-subscription.css?v=20260920-1" />
   </head>
   <body class="dashboard-active main-app-container">
@@ -590,6 +590,9 @@
         <p>Tell us where you create content and why you want to promote D50 Music.</p>
         <form id="affiliateApplicationForm">
           <label>Channel name<input id="affiliateChannelName" maxlength="100" required /></label>
+          <label>Requested coupon code
+            <input id="affiliateRequestedCode" minlength="3" maxlength="20" pattern="[A-Za-z0-9]+" placeholder="Example: NAME33" autocomplete="off" required />
+          </label>
           <label>Channel type
             <select id="affiliateChannelType" required>
               <option value="">Choose a platform…</option>
@@ -663,6 +666,6 @@
       </div>
     </div>
     <script src="pwa.js?v=20260921-pwa-1"></script>
-    <script src="script.js?v=20260927-affiliate-login-15"></script>
+    <script src="script.js?v=20260927-affiliate-code-16"></script>
   </body>
 </html>

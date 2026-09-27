@@ -3396,15 +3396,19 @@ function renderAffiliateApplications(applications) {
     heading.textContent = `${application.channelName} · ${application.channelType}`;
     const email = document.createElement("small");
     email.textContent = application.email;
+    const requestedCode = document.createElement("strong");
+    requestedCode.textContent = application.requestedCode
+      ? `Requested coupon code: ${application.requestedCode}`
+      : "Requested coupon code: legacy auto-generated code";
     const reason = document.createElement("p");
     reason.textContent = application.reason;
-    details.append(heading, email, reason);
+    details.append(heading, email, requestedCode, reason);
     const actions = document.createElement("div");
     actions.className = "affiliate-application-actions";
     const approve = document.createElement("button");
     approve.type = "button";
     approve.className = "approve-affiliate";
-    approve.textContent = "Approve & Create Code";
+    approve.textContent = "Approve & Create Coupon Code";
     approve.onclick = async () => {
       approve.disabled = true;
       const response = await apiFetch("/api/admin/affiliate/approve", {
@@ -3417,7 +3421,7 @@ function renderAffiliateApplications(applications) {
         approve.disabled = false;
         return alert(data.error || "The affiliate could not be approved.");
       }
-      alert(`Affiliate approved. Promotion Code: ${data.affiliateCode}`);
+      alert(`Affiliate approved. Stripe coupon code: ${data.affiliateCode}`);
       await loadAdminHub();
     };
     const reject = document.createElement("button");
@@ -3795,6 +3799,7 @@ function openAffiliateApplication() {
   hideModals();
   $("#affiliateChannelName").value = application.channelName || "";
   $("#affiliateChannelType").value = application.channelType || "";
+  $("#affiliateRequestedCode").value = application.requestedCode || "";
   $("#affiliateReason").value = application.reason || "";
   $("#affiliateApplicationMessage").textContent =
     application.status === "rejected"
@@ -3816,6 +3821,7 @@ $("#affiliateApplicationForm").onsubmit = async (event) => {
       body: JSON.stringify({
         channelName: $("#affiliateChannelName").value,
         channelType: $("#affiliateChannelType").value,
+        requestedCode: $("#affiliateRequestedCode").value,
         reason: $("#affiliateReason").value,
       }),
     });
