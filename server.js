@@ -138,13 +138,18 @@ const R2_PUBLIC_URL_VALID = (() => {
     return false;
   }
 })();
-const R2_CONFIGURED = Boolean(
-  R2_ACCOUNT_ID &&
-    R2_BUCKET_NAME &&
-    R2_ACCESS_KEY_ID &&
-    R2_SECRET_ACCESS_KEY &&
-    R2_PUBLIC_URL_VALID,
-);
+const R2_CONFIG_ISSUES = [
+  ...(!R2_BUCKET_NAME ? ["R2_BUCKET_NAME is empty"] : []),
+  ...(!R2_ACCOUNT_ID ? ["R2_ACCOUNT_ID is empty"] : []),
+  ...(!R2_ACCESS_KEY_ID ? ["R2_ACCESS_KEY_ID is empty"] : []),
+  ...(!R2_SECRET_ACCESS_KEY ? ["R2_SECRET_ACCESS_KEY is empty"] : []),
+  ...(!R2_DEV_URL ? ["R2_DEV_URL is empty"] :
+    !R2_PUBLIC_URL_VALID ? ["R2_DEV_URL must be the full https://pub-….r2.dev URL"] : []),
+];
+const R2_CONFIGURED = R2_CONFIG_ISSUES.length === 0;
+function r2ConfigError() {
+  return `Cloudflare R2 uploads are unavailable: ${R2_CONFIG_ISSUES.join("; ")}. Check these Render environment values and redeploy.`;
+}
 const r2 = R2_CONFIGURED
   ? new S3Client({
       region: "auto",
@@ -157,7 +162,7 @@ const r2 = R2_CONFIGURED
   : null;
 if (process.env.NODE_ENV === "production" && !R2_CONFIGURED) {
   console.warn(
-    "R2 media storage is not ready. Uploads will be rejected until all R2 variables and the complete pub-….r2.dev URL are configured.",
+    r2ConfigError(),
   );
 }
 const PREMIUM_CATEGORY_LIMIT = 5;
@@ -1309,8 +1314,7 @@ function productionR2Unavailable(response) {
   if (process.env.NODE_ENV !== "production" || R2_CONFIGURED) return false;
   response.status(503).json({
     code: "R2_NOT_CONFIGURED",
-    error:
-      "Uploads are temporarily unavailable until the complete Cloudflare R2 configuration is added in Render.",
+    error: r2ConfigError(),
   });
   return true;
 }
@@ -1629,8 +1633,7 @@ app.post(
     if (!R2_CONFIGURED) {
       return response.status(503).json({
         code: "R2_NOT_CONFIGURED",
-        error:
-          "R2 is not configured. Add the bucket credentials and the bucket's full pub-….r2.dev URL in Render.",
+        error: r2ConfigError(),
       });
     }
     if (request.user.banned) {
