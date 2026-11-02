@@ -172,10 +172,10 @@ const ADMIN_FREEZE_STRIKES = 3;
 const ADMIN_BAN_STRIKES = 6;
 const pendingUploadReservations = new Map();
 const approvalReservations = new Map();
-// Change these environment variables before exposing D50 outside your PC.
-const ADMIN_MASTER_PIN = String(
-  process.env.D50_ADMIN_MASTER_PIN || "12D50B22_DD_#12_Tisten",
-);
+// Keep the master PIN in Render only; no public-code fallback.
+const ADMIN_MASTER_PIN = String(process.env.D50_ADMIN_MASTER_PIN || "").trim();
+if (process.env.NODE_ENV === "production" && !ADMIN_MASTER_PIN)
+  console.warn("Master Admin unlock is disabled: D50_ADMIN_MASTER_PIN is empty in Render.");
 
 fs.mkdirSync(MUSIC_DIR, { recursive: true });
 fs.mkdirSync(COVERS_DIR, { recursive: true });
@@ -895,7 +895,7 @@ function accessFor(user) {
     premiumDaysRemaining: paid
       ? Math.max(0, Math.ceil((premiumExpiresAt - now) / 86400000))
       : 0,
-    autoRenew: paid ? user.autoRenew !== false : false,
+    autoRenew: false,
     trialEndsAt,
     daysLeft: 0,
     listenCount: Number(user.listenCount || 0),
@@ -910,7 +910,7 @@ function uploadCapacityFor(user, songs = readSongs()) {
     (song) => !song.status || song.status === "approved",
   ).length;
   const pendingCount = ownedSongs.filter(
-    (song) => song.status === "pending",
+    (song) => song.status === "pending" || song.status === "pending_review",
   ).length;
   return {
     freeApprovedUploadCount: approvedCount,
@@ -1764,6 +1764,29 @@ function extraSlotsCheckoutUrl(user) {
   return buildStripePaymentLinkUrl(STRIPE_DUO_LINK_URL, user);
 }
 
+async function personalPremiumLinkIsOneTime() {
+  if (!stripe || !STRIPE_PAYMENT_LINK_ID) return false;
+  const link = await stripe.paymentLinks.retrieve(STRIPE_PAYMENT_LINK_ID);
+  const items = await stripe.paymentLinks.listLineItems(STRIPE_PAYMENT_LINK_ID, { limit: 2 });
+  const item = items.data[0];
+  return Boolean(link.active && items.data.length === 1 && item?.quantity === 1 &&
+    item.price?.active && item.price?.type === "one_time" &&
+    item.price?.currency === "dkk" && item.price?.unit_amount === 3600);
+}
+
+async function requireOneTimePremiumLink(response) {
+  try {
+    if (await personalPremiumLinkIsOneTime()) return true;
+  } catch (error) {
+    console.error("Premium Payment Link verification failed:", error.message);
+  }
+  response.status(503).json({
+    code: "STRIPE_PREMIUM_PRICE_MISMATCH",
+    error: "The Premium checkout must use an active, one-time 36 DKK Stripe price before it can be offered as a 30-day pass.",
+  });
+  return false;
+}
+
 async function createCheckoutSession(request, response) {
   const paymentLinkUrl = personalPremiumCheckoutUrl(request.user);
   if (!paymentLinkUrl)
@@ -1771,6 +1794,7 @@ async function createCheckoutSession(request, response) {
       code: "STRIPE_PAYMENT_LINK_INVALID",
       error: "The 36 DKK personal Premium link is not configured correctly.",
     });
+  if (!(await requireOneTimePremiumLink(response))) return;
   response.json({
     paymentLink: true,
     product: "personal_premium",
@@ -1875,6 +1899,7 @@ app.post("/api/checkout", auth, async (request, response) => {
       code: "STRIPE_PAYMENT_LINK_INVALID",
       error: "The 36 DKK personal Premium link is not configured correctly.",
     });
+  if (!(await requireOneTimePremiumLink(response))) return;
 
   if (purchase !== "extra_slots")
     return response.json({
@@ -2002,7 +2027,7 @@ app.post("/api/auth/upgrade", auth, async (request, response) => {
   user.paid = true;
   user.paidAt = Date.now();
   user.premiumExpiresAt = user.paidAt + PREMIUM_PERIOD_MS;
-  user.autoRenew = true;
+  user.autoRenew = false;
   user.subscriptionCancelledAt = null;
   user.subscriptionAccessEndsAt = null;
   user.stripePaymentIntentIds = [
@@ -2061,17 +2086,10 @@ app.post("/api/billing/create-payment-intent", auth, async (request, response) =
   }
 });
 app.post("/api/auth/cancel-subscription", auth, async (request, response) => {
-  const users = readUsers();
-  const user = users.find((item) => item.id === request.user.id);
-  if (!user?.paid)
-    return response.status(409).json({
-      error: "This account does not have an active Premium subscription.",
-    });
-  user.autoRenew = false;
-  user.subscriptionCancelledAt = Date.now();
-  user.subscriptionAccessEndsAt = user.premiumExpiresAt;
-  await writeUsers(users);
-  response.json(publicUser(user));
+  response.status(410).json({
+    code: "ONE_TIME_PASS",
+    error: "Premium is a one-time 30-day pass. It does not renew automatically.",
+  });
 });
 
 function familyTokensFor(user) {
@@ -2376,7 +2394,7 @@ app.post("/api/admin/unlock", auth, async (request, response) => {
     });
   if (lockedUntil) user.adminLockedUntil = null;
 
-  const submitted = String(request.body.pin || "");
+  const submitted = String(request.body.pin || "").trim();
   const submittedDigest = crypto
     .createHash("sha256")
     .update(submitted)
@@ -2385,7 +2403,8 @@ app.post("/api/admin/unlock", auth, async (request, response) => {
     .createHash("sha256")
     .update(ADMIN_MASTER_PIN)
     .digest();
-  const masterMatch = crypto.timingSafeEqual(submittedDigest, masterDigest);
+  const masterMatch = Boolean(ADMIN_MASTER_PIN) &&
+    crypto.timingSafeEqual(submittedDigest, masterDigest);
   const codes = readCodes();
   const invite = masterMatch
     ? null
@@ -2433,6 +2452,7 @@ app.post("/api/admin/unlock", auth, async (request, response) => {
   }
 
   user.adminLockedUntil = null;
+  user.adminFailedAttempts = 0;
   user.adminMode = requestedMode;
   if (invite) {
     invite.status = "redeemed";
@@ -3297,7 +3317,7 @@ app.get(
   masterOnly,
   (request, response) => {
     const pending = readSongs()
-      .filter((song) => song.status === "pending")
+      .filter((song) => song.status === "pending" || song.status === "pending_review")
       .sort((a, b) => a.createdAt - b.createdAt)
       .map((song) => publicSong(song, request.user));
     response.json(pending);
@@ -3311,7 +3331,7 @@ app.patch(
   async (request, response) => {
     const songs = readSongs();
     const song = songs.find((item) => item.id === request.params.id);
-    if (!song || song.status !== "pending")
+    if (!song || !["pending", "pending_review"].includes(song.status))
       return response.status(404).json({ error: "Pending upload not found." });
     const owner = readUsers().find(
       (user) => user.id === (song.ownerId || song.uploadedBy),
@@ -3351,7 +3371,7 @@ app.delete(
   async (request, response) => {
     const songs = readSongs();
     const song = songs.find((item) => item.id === request.params.id);
-    if (!song || song.status !== "pending")
+    if (!song || !["pending", "pending_review"].includes(song.status))
       return response.status(404).json({ error: "Pending upload not found." });
     const audioPath = path.join(MUSIC_DIR, path.basename(song.filename || ""));
     if (song.filename) await fs.promises.unlink(audioPath).catch(() => {});
@@ -3361,6 +3381,15 @@ app.delete(
         path.basename(song.coverFilename),
       );
       await fs.promises.unlink(coverPath).catch(() => {});
+    }
+    if ((song.r2AudioKey || song.r2CoverKey) && !R2_CONFIGURED)
+      return response.status(503).json({ error: "Configure R2 before denying this recovered track, so its media can be removed." });
+    try {
+      if (song.r2AudioKey) await deleteR2Object(song.r2AudioKey);
+      if (song.r2CoverKey) await deleteR2Object(song.r2CoverKey);
+    } catch (error) {
+      console.error("Could not remove denied R2 media:", error.message);
+      return response.status(502).json({ error: "The R2 media could not be removed. Please retry the denial." });
     }
     await writeSongs(songs.filter((item) => item.id !== song.id));
     response.status(204).end();

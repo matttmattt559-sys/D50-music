@@ -13,7 +13,7 @@
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" href="/icons/d50-icon-192.png" sizes="192x192" />
     <link rel="apple-touch-icon" href="/icons/d50-icon-180.png" sizes="180x180" />
-    <link rel="stylesheet" href="style.css?v=20260927-affiliate-product-28" />
+    <link rel="stylesheet" href="style.css?v=20261102-legal-29" />
     <link rel="stylesheet" href="group-subscription.css?v=20260920-1" />
   </head>
   <body class="dashboard-active main-app-container">
@@ -140,7 +140,7 @@
         <b id="profileEmail">Guest</b>
         <small id="trialTimer">5 of 5 free listens left</small>
         <button id="cancelSubscriptionButton" class="cancel-subscription-link" type="button" hidden>
-          Stop Auto-Pay (Next 30 Days)
+          Premium pass details
         </button>
         <button id="manageGroupSubscription" class="cancel-subscription-link" type="button" hidden>
           Manage Group Subscription
@@ -224,6 +224,11 @@
         <div id="songLoadSentinel" class="song-load-sentinel" aria-live="polite">
           <span id="songLoadStatus">Scroll to load more songs</span>
         </div>
+        <nav class="home-legal-footer" aria-label="Legal information">
+          <a href="/legal/terms.html">Terms</a>
+          <a href="/legal/privacy.html">Privacy</a>
+          <a href="/legal/affiliate.html">Affiliate rules</a>
+        </nav>
       </section>
       <section id="search" hidden>
         <div class="search-layout">
@@ -271,7 +276,7 @@
       <section id="upload" hidden>
         <p class="eye">D50 CREATOR ACCESS</p>
         <h1>Upload music</h1>
-        <p>Audio is saved permanently on this computer.</p>
+        <p>Audio is stored in D50's cloud media storage. Upload only tracks you have the rights to share.</p>
         <p id="freeUploadNotice" class="free-upload-notice" hidden>
           Free accounts can keep up to 100 approved songs live and submit up to
           5 tracks at a time for review.
@@ -321,12 +326,12 @@
             <legend>Select Categories</legend>
             <div id="uploadCategoryChoices" class="category-checklist"></div>
           </fieldset>
-          <button>Save song to this PC</button>
+          <button>Upload song</button>
         </form>
         <p id="message"></p>
         <div class="stats">
           <b id="count">0</b><span>Total tracks</span><b>LOCAL</b
-          ><span>Storage</span>
+          ><span>Cloud storage</span>
         </div>
         <section
           id="uploadedSongsSection"
@@ -439,16 +444,14 @@
         <span class="premium-icon">✦</span>
         <p class="eye">D50 PREMIUM</p>
         <h1>Keep the signal flowing.</h1>
-        <p>
-          You've reached your free limit. Upgrade to Premium to unlock unlimited
-          listening, liking, and uploading!
-        </p>
-        <button id="upgradeNow" class="primary-button" type="button">Pay 36 DKK for Premium</button>
+        <p>Get 30 days of Premium access for one payment. No automatic renewal.
+          Premium includes unlimited listening, liking, and eligible uploads.</p>
+        <button id="upgradeNow" class="primary-button" type="button">Pay 36.00 DKK once · 30 days</button>
         <form id="affiliateCheckoutForm" class="affiliate-checkout-form">
           <label for="affiliateCheckoutCode">Have a creator code? Get 20% off</label>
           <div class="affiliate-checkout-controls">
             <input id="affiliateCheckoutCode" name="code" maxlength="20" pattern="[A-Za-z0-9]{3,20}" autocomplete="off" placeholder="Enter code" required />
-            <button id="affiliateCheckoutButton" type="submit" class="primary-button">Apply &amp; pay 28.80 DKK</button>
+            <button id="affiliateCheckoutButton" type="submit" class="primary-button">Pay 28.80 DKK once · 30 days</button>
           </div>
           <p id="affiliateCheckoutMessage" class="form-message" role="status"></p>
         </form>
@@ -513,11 +516,11 @@
       <div class="modal-card cancel-subscription-card" role="dialog" aria-modal="true" aria-labelledby="cancelSubscriptionTitle">
         <button class="modal-close" type="button" aria-label="Close">×</button>
         <p class="eye">PREMIUM BILLING</p>
-        <h1 id="cancelSubscriptionTitle">Stop Premium Auto-Pay?</h1>
-        <p>Are you sure you want to stop your Premium subscription payments for the next 30 days?</p>
+        <h1 id="cancelSubscriptionTitle">Premium pass details</h1>
+        <p>Your 30-day Premium pass is a one-time purchase and does not renew automatically.</p>
         <div class="cancel-subscription-actions">
-          <button id="keepPremiumButton" type="button">Keep Premium</button>
-          <button id="confirmCancelSubscription" type="button">Cancel Subscription</button>
+          <button id="keepPremiumButton" type="button">Close</button>
+          <button id="confirmCancelSubscription" type="button" hidden>No action needed</button>
         </div>
         <p id="cancelSubscriptionMessage" class="form-message"></p>
       </div>
@@ -527,6 +530,7 @@
         <p class="eye">UPLOAD RESPONSIBILITY</p>
         <h1 id="uploadWarningTitle">Before you upload</h1>
         <p id="uploadWarningText"></p>
+        <p><a href="/legal/terms.html" target="_blank" rel="noopener noreferrer">Read the upload terms</a></p>
         <button id="confirmUploadWarning" class="primary-button" type="button">
           I Confirm &amp; Agree
         </button>
@@ -688,6 +692,6 @@
       </div>
     </div>
     <script src="pwa.js?v=20260921-pwa-1"></script>
-    <script src="script.js?v=20260927-affiliate-product-28"></script>
+    <script src="script.js?v=20261102-legal-29"></script>
   </body>
 </html>

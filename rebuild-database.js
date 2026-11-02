@@ -118,9 +118,23 @@ async function main() {
       categories.push(category);
     }
     let inserted = 0;
+    let quarantined = 0;
     let skipped = 0;
     for (const track of tracks) {
       const id = idFor("song", track.Key);
+      const previous = existing.rows.find((row) => row.id === id && row.data?.r2AudioKey === track.Key);
+      if (previous) {
+        if (previous.data.title === "Restored Track" && previous.data.status === "approved") {
+          if (apply) await client.query(
+            `UPDATE songs SET status = 'pending_review',
+               data = jsonb_set(data, '{status}', '"pending_review"'::jsonb), updated_at = NOW()
+             WHERE id = $1 AND status = 'approved' AND data->>'r2AudioKey' = $2`,
+            [id, track.Key],
+          );
+          quarantined++;
+        } else skipped++;
+        continue;
+      }
       if (knownKeys.has(track.Key) || existing.rows.some((row) => row.id === id)) { skipped++; continue; }
       const cover = pairs.get(track.Key);
       const ownerId = owners.has(track.ownerId) ? track.ownerId : null;
@@ -132,12 +146,12 @@ async function main() {
         uploaderName: "Unknown", categoryIds: [category.id], likedBy: [],
         url: mediaUrl(track.Key), r2AudioKey: track.Key,
         coverFilename: null, coverUrl: cover ? mediaUrl(cover.Key) : null,
-        r2CoverKey: cover?.Key || null, status: "approved",
+        r2CoverKey: cover?.Key || null, status: "pending_review",
       };
       if (apply) {
         await client.query(
           `INSERT INTO songs (id, title, url, owner_id, status, data, created_at, updated_at)
-           VALUES ($1, $2, $3, $4, 'approved', $5::jsonb, $6, NOW())
+           VALUES ($1, $2, $3, $4, 'pending_review', $5::jsonb, $6, NOW())
            ON CONFLICT (id) DO NOTHING`,
           [id, song.title, song.url, ownerId, JSON.stringify(song), createdAt],
         );
@@ -153,7 +167,7 @@ async function main() {
       );
     if (apply) await client.query("COMMIT");
     else await client.query("ROLLBACK");
-    console.log(`${apply ? "Done" : "Dry run only"}: ${inserted} new tracks, ${skipped} already present. ${apply ? "Restart the Render service to refresh D50's in-memory catalog." : "Review cover matches, then run again with --apply."}`);
+    console.log(`${apply ? "Done" : "Dry run only"}: ${inserted} new pending-review tracks, ${quarantined} earlier restored tracks moved to review, ${skipped} already present. ${apply ? "Restart the Render service to refresh D50's in-memory catalog." : "Review cover matches, then run again with --apply."}`);
   } catch (error) {
     await client.query("ROLLBACK").catch(() => {});
     throw error;

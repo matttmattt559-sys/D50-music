@@ -5259,3 +5259,6 @@ button {
 .affiliate-checkout-controls { display: flex; flex-wrap: wrap; gap: 9px; }
 .affiliate-checkout-controls input { min-width: 130px; flex: 1 1 130px; border: 1px solid #615a71; border-radius: 9px; background: #161020; color: #fff; padding: 11px; }
 .affiliate-checkout-controls button { flex: 1 1 auto; }
+.home-legal-footer { display: flex; flex-wrap: wrap; gap: 10px 22px; justify-content: center; margin: 44px 12px 26px; padding: 18px 10px; border-top: 1px solid rgba(185, 165, 228, .22); font-size: 12px; }
+.home-legal-footer a { color: #c6b8df; text-decoration: none; }
+.home-legal-footer a:hover, .home-legal-footer a:focus-visible { color: #fff; text-decoration: underline; }

@@ -1,10 +1,14 @@
-const CACHE_NAME = "d50-app-shell-v23";
+const CACHE_NAME = "d50-app-shell-v24";
 const APP_SHELL = [
   "/",
   "/index.html",
   "/style.css",
   "/group-subscription.css",
   "/script.js",
+  "/legal/legal.css",
+  "/legal/terms.html",
+  "/legal/privacy.html",
+  "/legal/affiliate.html",
   "/pwa.js",
   "/manifest.webmanifest",
   "/icons/d50-icon-180.png",

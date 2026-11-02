@@ -980,7 +980,7 @@ function syncFreeUploadCapacityFromManagedUploads() {
     (song) => !song.status || song.status === "approved",
   ).length;
   user.freePendingUploadCount = owned.filter(
-    (song) => song.status === "pending",
+    (song) => song.status === "pending" || song.status === "pending_review",
   ).length;
 }
 function renderFreeUploadCapacity() {
@@ -2006,7 +2006,7 @@ function renderUploadedSongsManager() {
     const title = document.createElement("b");
     title.textContent = song.title;
     const subtitle = document.createElement("small");
-    subtitle.textContent = `${song.uploaderName || song.ownerEmail || user.email} · ${song.status === "pending" ? "Pending Master Admin review" : "Approved"}`;
+    subtitle.textContent = `${song.uploaderName || song.ownerEmail || user.email} · ${["pending", "pending_review"].includes(song.status) ? "Pending Master Admin review" : "Approved"}`;
     const likeTotal = document.createElement("span");
     likeTotal.className = "manager-like-total";
     likeTotal.textContent = `♥ ${Number(song.likedCount || 0)} public ${Number(song.likedCount || 0) === 1 ? "like" : "likes"}`;
@@ -2924,9 +2924,8 @@ $("#redeemGroupTokenForm").onsubmit = async (event) => {
 };
 function maybeShowUploadWarning() {
   if (!user || user.adminMode || user.hasSeenUploadWarning) return;
-  $("#uploadWarningText").textContent = user.paid
-    ? "Notice: You confirm that any music you upload is entirely yours and you have full permission to distribute it. Uploading unauthorized content, using offensive or bad names on songs/categories, or using inappropriate image covers will result in a permanent feature ban from uploading and category visibility."
-    : "Notice: You confirm that any music you upload is entirely yours and you have full permission to distribute it. Uploading unauthorized or copyrighted material will result in a permanent ban from uploading songs.";
+  $("#uploadWarningText").textContent =
+    "Only upload music and cover art you own or have all permissions to share and stream on D50. Unlicensed samples and cloned identifiable celebrity vocals are not allowed. Read the Terms before uploading; violations can lead to removal or account restrictions.";
   $("#uploadWarningMessage").textContent = "";
   document.body.classList.add("upload-warning-active");
   $("#uploadWarningModal").hidden = false;
@@ -4167,7 +4166,7 @@ function updateProfile() {
       : user.adminMode === "free"
         ? "Unlimited playback and likes"
         : user.paid
-          ? `Premium Days: ${Math.max(0, Number(user.premiumDaysRemaining || 0))}${user.autoRenew === false ? " (Auto-Pay Off)" : ""}`
+          ? `Premium pass · ${Math.max(0, Number(user.premiumDaysRemaining || 0))} days left · no renewal`
           : user.trialActive
             ? `${user.daysLeft} day${user.daysLeft === 1 ? "" : "s"} left in trial`
             : `${Math.max(0, user.freeListenLimit - user.listenCount)} of ${user.freeListenLimit} free listens left`;
@@ -4196,8 +4195,7 @@ function updateProfile() {
   $("#manageGroupSubscription").hidden = false;
   $("#mobileGroupSubscription").hidden = false;
   $("#headerUpgrade").hidden = user.premium;
-  $("#cancelSubscriptionButton").hidden =
-    !user.paid || Boolean(user.adminMode) || user.autoRenew === false;
+  $("#cancelSubscriptionButton").hidden = true;
   $("#adminHubButton").hidden = user.adminMode !== "master";
   $("#freeUploadsButton").hidden = user.adminMode !== "master";
   if (user.adminMode !== "master") {
@@ -4462,14 +4460,13 @@ $("#headerAccountIcon").onclick = () => {
 };
 $("#topAccess").onclick = () => {
   if (!user) showAccountGate();
-  else if (user.paid && !user.adminMode && user.autoRenew !== false)
-    openCancelSubscription();
+  else if (user.paid) openCancelSubscription();
 };
 function openCancelSubscription() {
-  if (!user?.paid || user.adminMode || user.autoRenew === false) return;
+  if (!user?.paid || user.adminMode) return;
   $("#cancelSubscriptionMessage").textContent = "";
   $("#cancelSubscriptionModal").hidden = false;
-  $("#confirmCancelSubscription").focus();
+  $("#keepPremiumButton").focus();
 }
 $("#cancelSubscriptionButton").onclick = openCancelSubscription;
 $("#keepPremiumButton").onclick = () => {
