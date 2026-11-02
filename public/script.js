@@ -3535,7 +3535,9 @@ function renderApprovedAffiliates(affiliates) {
     email.textContent = affiliate.email;
     const code = document.createElement("strong");
     code.textContent = `Code: ${affiliate.code} · Referrals: ${affiliate.referralCount}`;
-    details.append(heading, email, code);
+    const earnings = document.createElement("small");
+    earnings.textContent = `Estimated unpaid commission: ${((affiliate.earnings?.estimatedUnpaidOre || 0) / 100).toFixed(2)} DKK · payouts not enabled`;
+    details.append(heading, email, code, earnings);
     const actions = document.createElement("div");
     actions.className = "affiliate-application-actions";
     const remove = document.createElement("button");
@@ -3900,6 +3902,18 @@ function handlePendingPreviewEnded() {
 function renderPartnerDetails() {
   $("#affiliatePartnerCode").textContent = user?.affiliateCode || "";
   $("#affiliatePartnerCount").textContent = Number(user?.referralCount || 0).toLocaleString();
+  $("#affiliatePartnerEarnings").textContent = "Loading…";
+  apiFetch("/api/affiliate/earnings", { cache: "no-store" })
+    .then(async (response) => {
+      if (!response.ok) throw new Error("Could not load commissions");
+      const data = await response.json();
+      if (!$("#affiliatePartnerModal").hidden)
+        $("#affiliatePartnerEarnings").textContent = `${(data.estimatedUnpaidOre / 100).toFixed(2)} DKK`;
+    })
+    .catch(() => {
+      if (!$("#affiliatePartnerModal").hidden)
+        $("#affiliatePartnerEarnings").textContent = "Unavailable";
+    });
 }
 function showPartnerDetails() {
   if (!user?.isAffiliate || !user.affiliateCode) return;

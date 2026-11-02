@@ -50,6 +50,8 @@ const USERS_FILE = path.join(DATA_DIR, "users.json");
 const REPORTS_FILE = path.join(DATA_DIR, "reports.json");
 const CODES_FILE = path.join(DATA_DIR, "codes.json");
 const PREMIUM_CODES_FILE = path.join(DATA_DIR, "premium-codes.json");
+const AFFILIATE_COMMISSIONS_FILE = path.join(DATA_DIR, "affiliate-commissions.json");
+const AFFILIATE_COMMISSION_RATE = 10;
 const allowedAudioExtensions = new Set([".mp3", ".wav", ".m4a"]);
 const allowedCoverExtensions = new Set([".jpg", ".jpeg", ".png"]);
 const AUDIO_LIMIT = 15 * 1024 * 1024;
@@ -365,6 +367,8 @@ const readCodes = () => readJson(CODES_FILE);
 const writeCodes = (value) => writeJson(CODES_FILE, value);
 const readLocalPremiumCodes = () => readJson(PREMIUM_CODES_FILE);
 const writeLocalPremiumCodes = (value) => writeJson(PREMIUM_CODES_FILE, value);
+const readLocalAffiliateCommissions = () => readJson(AFFILIATE_COMMISSIONS_FILE);
+const writeLocalAffiliateCommissions = (value) => writeJson(AFFILIATE_COMMISSIONS_FILE, value);
 const DATA_FILES = [
   SONGS_FILE,
   CATEGORIES_FILE,
@@ -372,6 +376,7 @@ const DATA_FILES = [
   REPORTS_FILE,
   CODES_FILE,
   PREMIUM_CODES_FILE,
+  AFFILIATE_COMMISSIONS_FILE,
 ];
 
 function normalizeRedeemableCode(value) {
@@ -551,6 +556,20 @@ async function initializePostgresSchema() {
     claimed_at BIGINT DEFAULT NULL,
     expires_at BIGINT DEFAULT NULL
   )`);
+  await postgres.query(`CREATE TABLE IF NOT EXISTS affiliate_commissions (
+    session_id TEXT PRIMARY KEY,
+    payment_intent_id TEXT,
+    affiliate_user_id TEXT NOT NULL,
+    affiliate_code TEXT NOT NULL,
+    buyer_user_id TEXT NOT NULL,
+    gross_amount INTEGER NOT NULL CHECK (gross_amount > 0),
+    refunded_amount INTEGER NOT NULL DEFAULT 0,
+    commission_amount INTEGER NOT NULL CHECK (commission_amount >= 0),
+    currency TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`);
+  await postgres.query("CREATE INDEX IF NOT EXISTS affiliate_commissions_affiliate_idx ON affiliate_commissions (affiliate_user_id)");
+  await postgres.query("CREATE INDEX IF NOT EXISTS affiliate_commissions_payment_idx ON affiliate_commissions (payment_intent_id)");
   await postgres.query(
     "ALTER TABLE premium_codes ADD COLUMN IF NOT EXISTS claimed_at BIGINT DEFAULT NULL",
   );
@@ -1368,6 +1387,122 @@ function promotionCouponId(promotionCode) {
   return typeof coupon === "string" ? coupon : coupon?.id || "";
 }
 
+function affiliateCommissionAmount(grossAmount, refundedAmount = 0) {
+  return Math.floor(Math.max(0, grossAmount - refundedAmount) * AFFILIATE_COMMISSION_RATE / 100);
+}
+
+async function saveAffiliateCommission(session, affiliate, buyerUserId) {
+  const amount = session.amount_total;
+  if (session.currency !== "dkk" || !Number.isSafeInteger(amount) || amount !== 2880)
+    throw new Error(`Unexpected affiliate charge for ${session.id}; commission was not recorded.`);
+  const paymentIntentId = typeof session.payment_intent === "string"
+    ? session.payment_intent : session.payment_intent?.id;
+  if (!paymentIntentId)
+    throw new Error(`Missing payment intent for affiliate checkout ${session.id}.`);
+  const entry = {
+    sessionId: session.id,
+    paymentIntentId,
+    affiliateUserId: affiliate.id,
+    affiliateCode: affiliate.affiliateCode,
+    buyerUserId,
+    grossAmount: amount,
+    refundedAmount: 0,
+    commissionAmount: affiliateCommissionAmount(amount),
+    currency: "dkk",
+    createdAt: Date.now(),
+  };
+  if (DATABASE_PROVIDER === "postgres") {
+    await postgres.query(
+      `INSERT INTO affiliate_commissions
+       (session_id, payment_intent_id, affiliate_user_id, affiliate_code,
+        buyer_user_id, gross_amount, commission_amount, currency)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       ON CONFLICT (session_id) DO NOTHING`,
+      [entry.sessionId, entry.paymentIntentId, entry.affiliateUserId,
+        entry.affiliateCode, entry.buyerUserId, entry.grossAmount,
+        entry.commissionAmount, entry.currency],
+    );
+  } else {
+    const entries = readLocalAffiliateCommissions();
+    if (!entries.some((item) => item.sessionId === entry.sessionId)) {
+      entries.push(entry);
+      await writeLocalAffiliateCommissions(entries);
+    }
+  }
+}
+
+async function affiliateCommissionSummary(affiliateUserId) {
+  let entries;
+  if (DATABASE_PROVIDER === "postgres") {
+    const result = await postgres.query(
+      `SELECT gross_amount AS "grossAmount", refunded_amount AS "refundedAmount",
+              commission_amount AS "commissionAmount"
+       FROM affiliate_commissions WHERE affiliate_user_id = $1`,
+      [affiliateUserId],
+    );
+    entries = result.rows;
+  } else {
+    entries = readLocalAffiliateCommissions()
+      .filter((entry) => entry.affiliateUserId === affiliateUserId);
+  }
+  return {
+    currency: "DKK",
+    ratePercent: AFFILIATE_COMMISSION_RATE,
+    paidPurchases: entries.filter((entry) => Number(entry.refundedAmount) < Number(entry.grossAmount)).length,
+    estimatedUnpaidOre: entries.reduce((sum, entry) => sum + Number(entry.commissionAmount), 0),
+    payoutsEnabled: false,
+  };
+}
+
+async function adjustAffiliateCommissionForRefund(charge) {
+  const paymentIntentId = typeof charge.payment_intent === "string"
+    ? charge.payment_intent : charge.payment_intent?.id;
+  if (!paymentIntentId || !Number.isSafeInteger(charge.amount_refunded)) return;
+  if (DATABASE_PROVIDER === "postgres") {
+    const result = await postgres.query(
+      `UPDATE affiliate_commissions
+       SET refunded_amount = LEAST(gross_amount, GREATEST(refunded_amount, $2)),
+           commission_amount = FLOOR(
+             (gross_amount - LEAST(gross_amount, GREATEST(refunded_amount, $2))) * $3 / 100.0
+           )::integer
+       WHERE payment_intent_id = $1 AND refunded_amount < $2
+       RETURNING affiliate_user_id AS "affiliateUserId", gross_amount AS "grossAmount",
+                 refunded_amount AS "refundedAmount"`,
+      [paymentIntentId, charge.amount_refunded, AFFILIATE_COMMISSION_RATE],
+    );
+    for (const entry of result.rows) {
+      if (Number(entry.refundedAmount) === Number(entry.grossAmount)) {
+        const users = readUsers();
+        const affiliate = users.find((user) => user.id === entry.affiliateUserId);
+        if (affiliate) {
+          affiliate.referralCount = Math.max(0, Number(affiliate.referralCount || 0) - 1);
+          await writeUsers(users);
+        }
+      }
+    }
+    return;
+  }
+  const entries = readLocalAffiliateCommissions();
+  let changed = false;
+  const users = readUsers();
+  for (const entry of entries) {
+    if (entry.paymentIntentId !== paymentIntentId ||
+        Number(entry.refundedAmount) >= charge.amount_refunded) continue;
+    const previouslyFull = Number(entry.refundedAmount) >= Number(entry.grossAmount);
+    entry.refundedAmount = Math.min(entry.grossAmount, charge.amount_refunded);
+    entry.commissionAmount = affiliateCommissionAmount(entry.grossAmount, entry.refundedAmount);
+    if (!previouslyFull && entry.refundedAmount === entry.grossAmount) {
+      const affiliate = users.find((user) => user.id === entry.affiliateUserId);
+      if (affiliate) affiliate.referralCount = Math.max(0, Number(affiliate.referralCount || 0) - 1);
+    }
+    changed = true;
+  }
+  if (changed) {
+    await writeLocalAffiliateCommissions(entries);
+    await writeUsers(users);
+  }
+}
+
 async function recordAffiliateReferral(session, users, purchaserUserId) {
   // The server records the approved creator in Stripe Checkout metadata.
   const directAffiliateId = session.metadata?.d50_affiliate_user_id;
@@ -1381,6 +1516,7 @@ async function recordAffiliateReferral(session, users, purchaserUserId) {
     const processed = Array.isArray(affiliate.affiliateReferralSessionIds)
       ? affiliate.affiliateReferralSessionIds : [];
     if (processed.includes(session.id)) return false;
+    await saveAffiliateCommission(session, affiliate, purchaserUserId);
     affiliate.referralCount = Number(affiliate.referralCount || 0) + 1;
     affiliate.affiliateReferralSessionIds = [...processed, session.id];
     return true;
@@ -1407,6 +1543,7 @@ async function recordAffiliateReferral(session, users, purchaserUserId) {
       ? affiliate.affiliateReferralSessionIds
       : [];
     if (processed.includes(session.id)) return false;
+    await saveAffiliateCommission(session, affiliate, purchaserUserId);
     affiliate.referralCount = Number(affiliate.referralCount || 0) + 1;
     affiliate.affiliateReferralSessionIds = [...processed, session.id];
     return true;
@@ -1434,7 +1571,13 @@ app.post(
       return response.status(400).send("Invalid Stripe webhook signature.");
     }
 
-    if (event.type === "checkout.session.completed") {
+    if (event.type === "charge.refunded") {
+      await adjustAffiliateCommissionForRefund(event.data.object);
+      return response.status(200).json({ received: true });
+    }
+
+    if (event.type === "checkout.session.completed" ||
+        event.type === "checkout.session.async_payment_succeeded") {
       const session = event.data.object;
       const sessionPaymentLinkId =
         typeof session.payment_link === "string"
@@ -2688,8 +2831,14 @@ app.get("/api/admin/earnings", auth, masterOnly, async (_request, response) => {
   }
 });
 
-app.get("/api/admin/affiliate/approved", auth, masterOnly, (_request, response) => {
-  response.json(readUsers()
+app.get("/api/affiliate/earnings", auth, async (request, response) => {
+  if (!request.user.isAffiliate)
+    return response.status(403).json({ error: "An approved affiliate account is required." });
+  response.json(await affiliateCommissionSummary(request.user.id));
+});
+
+app.get("/api/admin/affiliate/approved", auth, masterOnly, async (_request, response) => {
+  const affiliates = readUsers()
     .filter((entry) => entry.isAffiliate && entry.affiliateCode)
     .map((entry) => ({
       userId: entry.id,
@@ -2700,7 +2849,11 @@ app.get("/api/admin/affiliate/approved", auth, masterOnly, (_request, response) 
       referralCount: Number(entry.referralCount || 0),
       approvedAt: entry.affiliateApplication?.reviewedAt || null,
     }))
-    .sort((a, b) => a.channelName.localeCompare(b.channelName)));
+    .sort((a, b) => a.channelName.localeCompare(b.channelName));
+  response.json(await Promise.all(affiliates.map(async (affiliate) => ({
+    ...affiliate,
+    earnings: await affiliateCommissionSummary(affiliate.userId),
+  }))));
 });
 
 app.post("/api/admin/affiliate/remove", auth, masterOnly, async (request, response) => {
