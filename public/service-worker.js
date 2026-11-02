@@ -1,4 +1,4 @@
-const CACHE_NAME = "d50-app-shell-v24";
+const CACHE_NAME = "d50-app-shell-v26";
 const APP_SHELL = [
   "/",
   "/index.html",
@@ -9,6 +9,8 @@ const APP_SHELL = [
   "/legal/terms.html",
   "/legal/privacy.html",
   "/legal/affiliate.html",
+  "/legal/contact.html",
+  "/legal/contact.js",
   "/pwa.js",
   "/manifest.webmanifest",
   "/icons/d50-icon-180.png",

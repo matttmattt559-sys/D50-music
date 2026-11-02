@@ -998,19 +998,14 @@ function renderFreeUploadCapacity() {
     return;
   }
   const approved = Number(user.freeApprovedUploadCount || 0);
-  const pending = Number(user.freePendingUploadCount || 0);
   const approvedLimit = Number(user.freeApprovedUploadLimit || 100);
-  const pendingLimit = Number(user.freePendingUploadLimit || 5);
   const approvedFull = approved >= approvedLimit;
-  const pendingFull = pending >= pendingLimit;
-  const locked = approvedFull || pendingFull;
+  const locked = approvedFull;
   notice.hidden = false;
   notice.classList.toggle("capacity-locked", locked);
   notice.textContent = approvedFull
     ? "Your live approved catalog is full (Max 100). Delete an approved song to unlock a new upload slot."
-    : pendingFull
-      ? "Your pending review queue is full (Max 5). Wait for Admin approval."
-      : `Approved: ${approved}/${approvedLimit} · Pending review: ${pending}/${pendingLimit}`;
+    : `Public songs: ${approved}/${approvedLimit}`;
   form.dataset.capacityLocked = String(locked);
   form.classList.toggle("upload-capacity-locked", locked);
   form.querySelectorAll("input, button").forEach(
@@ -1253,13 +1248,15 @@ function bindAdminUi() {
   const codeForm = $("#adminCodeForm");
   const premiumCodeForm = $("#premiumCodeForm");
   const manualBan = $("#manualBanButton");
+  const recoveryButton = $("#recoveryReviewButton");
   const banForm = $("#banAccountForm");
   const previewAudio = $("#pendingPreviewAudio");
-  if (!codeForm || !premiumCodeForm || !manualBan || !banForm || !previewAudio)
+  if (!codeForm || !premiumCodeForm || !manualBan || !recoveryButton || !banForm || !previewAudio)
     return false;
   codeForm.onsubmit = handleAdminCodeSubmit;
   premiumCodeForm.onsubmit = handlePremiumCodeSubmit;
   manualBan.onclick = () => openBanAccountModal();
+  recoveryButton.onclick = openRecoveryReview;
   banForm.onsubmit = handleBanAccountSubmit;
   previewAudio.addEventListener("ended", handlePendingPreviewEnded);
   $$("#adminHubModal .modal-close, #freeUploadsModal .modal-close, #banAccountModal .modal-close").forEach(
@@ -2556,9 +2553,7 @@ $("#form").onsubmit = async (e) => {
     return;
   }
   if (d.uploadCapacity) Object.assign(user, d.uploadCapacity);
-  $("#message").textContent = d.pendingReview
-    ? "Submitted for Master Admin approval."
-    : "Saved and ready to play.";
+  $("#message").textContent = "Published and ready to play.";
   e.target.reset();
   $("#coverName").textContent = "Choose cover image · maximum 2 MB";
   await load();
@@ -3079,6 +3074,26 @@ $("#adminPinForm").onsubmit = async (event) => {
   updateProfile();
   await load();
 };
+async function deleteReportedSong(report, button) {
+  if (!confirm(`Delete “${report.itemName || "this song"}” permanently?`)) return;
+  button.disabled = true;
+  try {
+    const response = await apiFetch(
+      `/api/songs/${encodeURIComponent(report.songId || report.itemId)}`,
+      {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: report.reason || "Removed after content report review." }),
+      },
+    );
+    if (!response.ok && response.status !== 404) return handleLocked(response);
+    const removedReport = await apiFetch(`/api/reports/${report.id}`, { method: "DELETE" });
+    if (!removedReport.ok) return handleLocked(removedReport);
+    await Promise.all([loadAdminHub(), load()]);
+  } finally {
+    button.disabled = false;
+  }
+}
 function renderAdminReports(reports) {
   const activePanel = $("#activeReportsPanel");
   const savedPanel = $("#savedReportsPanel");
@@ -3122,27 +3137,7 @@ function renderAdminReports(reports) {
       deleteSong.type = "button";
       deleteSong.className = "delete-reported-song";
       deleteSong.textContent = "Delete Song";
-      deleteSong.onclick = async () => {
-        if (!confirm(`Delete “${report.itemName || "this song"}” permanently?`))
-          return;
-        deleteSong.disabled = true;
-        const deleteResponse = await apiFetch(
-          `/api/songs/${encodeURIComponent(report.songId || report.itemId)}`,
-          {
-            method: "DELETE",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              reason: report.reason || "Removed after content report review.",
-            }),
-          },
-        );
-        if (!deleteResponse.ok && deleteResponse.status !== 404) {
-          deleteSong.disabled = false;
-          return handleLocked(deleteResponse);
-        }
-        await apiFetch(`/api/reports/${report.id}`, { method: "DELETE" });
-        await Promise.all([loadAdminHub(), load()]);
-      };
+      deleteSong.onclick = () => deleteReportedSong(report, deleteSong);
       const dismiss = document.createElement("button");
       dismiss.type = "button";
       dismiss.className = "dismiss-report";
@@ -3204,6 +3199,14 @@ function renderAdminReports(reports) {
       meta.textContent = new Date(report.createdAt).toLocaleString();
       const actions = document.createElement("div");
       actions.className = "admin-report-actions";
+      if (report.itemType === "song") {
+        const removeSong = document.createElement("button");
+        removeSong.type = "button";
+        removeSong.className = "delete-reported-song";
+        removeSong.textContent = "Delete Song";
+        removeSong.onclick = () => deleteReportedSong(report, removeSong);
+        actions.append(removeSong);
+      }
       const remember = document.createElement("button");
       remember.type = "button";
       remember.textContent = report.remembered ? "★ Saved" : "☆ Remember";
@@ -3724,7 +3727,8 @@ $("#adminHubButton").onclick = async () => {
   await loadAdminHub();
 };
 function updateFreeUploadsCount() {
-  $("#freeUploadsCount").textContent = String(pendingUploads.length);
+  const count = document.getElementById("recoveryReviewCount");
+  if (count) count.textContent = String(pendingUploads.length);
 }
 function startPendingPreview(track) {
   const previewAudio = $("#pendingPreviewAudio");
@@ -3882,14 +3886,14 @@ async function syncPendingUploads(renderOpenModal = false) {
     pendingUploadsLoading = false;
   }
 }
-$("#freeUploadsButton").onclick = async () => {
+async function openRecoveryReview() {
   if (user?.adminMode !== "master") return;
   if (!(await ensureAdminUi())) return;
   $("#freeUploadsModal").hidden = false;
-  $("#freeUploadsMessage").textContent = "Loading pending uploads…";
+  $("#freeUploadsMessage").textContent = "Loading older and recovered tracks…";
   await syncPendingUploads(true);
   if ($("#freeUploadsMessage")) $("#freeUploadsMessage").textContent = "";
-};
+}
 function handlePendingPreviewEnded() {
   stopPendingPreview();
 }
@@ -3997,6 +4001,11 @@ function openReportForSong(songId) {
     );
   select.value = songId;
   $("#reportReasonInput").value = "";
+  $("#reportContentLocation").textContent =
+    `Content location: ${songs.find((song) => song.id === songId)?.url || songId}`;
+  $("#reportNoticeEmail").value = user?.email || "";
+  $("#reportElectronicSignature").value = "";
+  $("#reportUserDeclaration").checked = false;
   $("#reportSubmitMessage").textContent = "";
   $("#sendReportButton").disabled = true;
   $("#reportSubmitModal").hidden = false;
@@ -4015,18 +4024,35 @@ function finishReportMode() {
 function updateReportSubmitState() {
   const hasSong = Boolean($("#reportSongSelect").value);
   const hasReason = Boolean($("#reportReasonInput").value.trim());
-  $("#sendReportButton").disabled = !hasSong || !hasReason;
+  const email = $("#reportNoticeEmail");
+  const name = $("#reportElectronicSignature");
+  $("#sendReportButton").disabled = !hasSong || !hasReason ||
+    !email.checkValidity() || !email.value.trim() ||
+    !name.checkValidity() || !name.value.trim() ||
+    !$("#reportUserDeclaration").checked;
 }
-$("#reportSongSelect").addEventListener("change", updateReportSubmitState);
+$("#reportSongSelect").addEventListener("change", () => {
+  const songId = $("#reportSongSelect").value;
+  $("#reportContentLocation").textContent = songId
+    ? `Content location: ${songs.find((song) => song.id === songId)?.url || songId}`
+    : "";
+  updateReportSubmitState();
+});
 $("#reportReasonInput").addEventListener("input", updateReportSubmitState);
+$("#reportNoticeEmail").addEventListener("input", updateReportSubmitState);
+$("#reportElectronicSignature").addEventListener("input", updateReportSubmitState);
+$("#reportUserDeclaration").addEventListener("change", updateReportSubmitState);
 $("#reportSubmitForm").onsubmit = async (event) => {
   event.preventDefault();
   const itemId = $("#reportSongSelect").value;
   const reason = cleanText($("#reportReasonInput").value, 500);
-  if (!itemId || !reason) {
+  const noticeEmail = $("#reportNoticeEmail").value.trim();
+  const electronicSignature = cleanText($("#reportElectronicSignature").value, 120);
+  const userDeclaration = $("#reportUserDeclaration").checked;
+  if (!itemId || !reason || !noticeEmail || !$("#reportNoticeEmail").checkValidity() ||
+      electronicSignature.length < 2 || !userDeclaration) {
     updateReportSubmitState();
-    $("#reportSubmitMessage").textContent =
-      !itemId ? "Select a song to report." : "A written reason is required.";
+    $("#reportSubmitMessage").textContent = "Complete the song, reason, email, name and declaration before sending.";
     return;
   }
   const button = $("#sendReportButton");
@@ -4036,7 +4062,7 @@ $("#reportSubmitForm").onsubmit = async (event) => {
     const response = await apiFetch("/api/reports/submit", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ itemId, reason }),
+      body: JSON.stringify({ itemId, reason, noticeEmail, electronicSignature, userDeclaration }),
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
@@ -4197,7 +4223,6 @@ function updateProfile() {
   $("#headerUpgrade").hidden = user.premium;
   $("#cancelSubscriptionButton").hidden = true;
   $("#adminHubButton").hidden = user.adminMode !== "master";
-  $("#freeUploadsButton").hidden = user.adminMode !== "master";
   if (user.adminMode !== "master") {
     pendingUploads = [];
     updateFreeUploadsCount();
@@ -4262,7 +4287,6 @@ function updateGuestProfile() {
   $("#headerUpgrade").hidden = true;
   $("#cancelSubscriptionButton").hidden = true;
   $("#adminHubButton").hidden = true;
-  $("#freeUploadsButton").hidden = true;
   pendingUploads = [];
   updateFreeUploadsCount();
   $("#reportContentButton").hidden = false;

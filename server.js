@@ -170,7 +170,6 @@ const CATEGORY_SONG_LIMIT = 50;
 const ADMIN_FREEZE_MS = 15 * 60 * 1000;
 const ADMIN_FREEZE_STRIKES = 3;
 const ADMIN_BAN_STRIKES = 6;
-const pendingUploadReservations = new Map();
 const approvalReservations = new Map();
 // Keep the master PIN in Render only; no public-code fallback.
 const ADMIN_MASTER_PIN = String(process.env.D50_ADMIN_MASTER_PIN || "").trim();
@@ -1568,6 +1567,12 @@ app.use((request, response, next) => {
   next();
 });
 app.use(express.static(path.join(ROOT, "public")));
+app.get("/api/legal/contact", (_request, response) => {
+  const email = String(process.env.D50_DSA_CONTACT_EMAIL || "").trim();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
+    return response.status(503).json({ error: "D50_DSA_CONTACT_EMAIL is not configured in Render." });
+  response.json({ email });
+});
 app.get("/music/:filename", (request, response) => {
   const filename = path.basename(request.params.filename);
   if (filename !== request.params.filename)
@@ -2769,6 +2774,9 @@ const MASTER_ADMIN_UI_FRAGMENT = `
       <h2>Active Report Queue (Free User Reports)</h2>
       <div id="freeUserReportsPanel" class="admin-hub-panel free-user-reports-panel"></div>
     </section>
+    <section class="admin-queue-section">
+      <button id="recoveryReviewButton" type="button" class="admin-hub-button">Review older or recovered tracks (<span id="recoveryReviewCount">0</span>)</button>
+    </section>
     <div class="admin-hub-board">
       <section class="admin-hub-column reports-column">
         <div class="admin-queue-section">
@@ -2835,8 +2843,8 @@ const MASTER_ADMIN_UI_FRAGMENT = `
   <div class="modal-card free-uploads-card">
     <button class="modal-close" type="button" aria-label="Close">×</button>
     <p class="eye">MASTER ADMIN REVIEW</p>
-    <h1>Free Uploads</h1>
-    <p>Preview pending tracks before publishing or denying them.</p>
+    <h1>Older and recovered tracks</h1>
+    <p>Review tracks left pending by older versions or the R2 recovery tool. New uploads publish immediately.</p>
     <div id="freeUploadsList" class="free-uploads-list"></div>
     <p id="freeUploadsMessage" class="form-message"></p>
     <audio id="pendingPreviewAudio" preload="metadata"></audio>
@@ -3031,6 +3039,9 @@ app.post("/api/reports", auth, reporterOnly, async (request, response) => {
 app.post("/api/reports/submit", optionalAuth, async (request, response) => {
   const itemId = sanitizeText(request.body.itemId, 80);
   const reason = sanitizeText(request.body.reason, 500);
+  const electronicSignature = sanitizeText(request.body.electronicSignature, 120);
+  const noticeEmail = sanitizeText(request.body.noticeEmail, 254);
+  const userDeclaration = request.body.userDeclaration === true;
   if (!reason)
     return response.status(400).json({
       code: "REPORT_REASON_REQUIRED",
@@ -3040,6 +3051,21 @@ app.post("/api/reports/submit", optionalAuth, async (request, response) => {
     return response.status(400).json({
       code: "REPORT_SONG_REQUIRED",
       error: "Select a song to report.",
+    });
+  if (electronicSignature.length < 2)
+    return response.status(400).json({
+      code: "REPORT_SIGNATURE_REQUIRED",
+      error: "Type your full legal name as an electronic signature.",
+    });
+  if (!userDeclaration)
+    return response.status(400).json({
+      code: "REPORT_DECLARATION_REQUIRED",
+      error: "Confirm that your notice is accurate and complete to the best of your knowledge.",
+    });
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(noticeEmail))
+    return response.status(400).json({
+      code: "REPORT_EMAIL_REQUIRED",
+      error: "Enter a valid contact email for this notice.",
     });
   const song = readSongs().find((entry) => entry.id === itemId);
   if (!song)
@@ -3064,13 +3090,17 @@ app.post("/api/reports/submit", optionalAuth, async (request, response) => {
     itemId: song.id,
     itemName: song.title,
     reason,
+    electronicSignature,
+    userDeclaration,
+    noticeEmail,
+    contentUrl: song.url,
     songId: song.id,
     reportedUserId,
     reportedUserEmail: reportedUser?.email || null,
     reporterId: request.user?.id || null,
-    reporterEmail: request.user?.email || null,
+    reporterEmail: noticeEmail,
     reporterIp: request.user ? null : reporterIp,
-    senderDisplay: request.user?.email || reporterIp,
+    senderDisplay: noticeEmail,
     queueType: isFreeOrGuest ? "free_user_active" : "standard_active",
     remembered: false,
     createdAt: Date.now(),
@@ -3454,8 +3484,8 @@ app.post(
               : "The selected cover is not a valid JPG or PNG image.",
       });
     }
-    const canPublishImmediately = accessFor(request.user).canManage;
-    const requestedCategoryIds = !canPublishImmediately
+    const canAssignCategories = accessFor(request.user).canManage;
+    const requestedCategoryIds = !canAssignCategories
       ? []
       : Array.isArray(request.body.categoryIds)
       ? request.body.categoryIds
@@ -3463,7 +3493,7 @@ app.post(
         ? [request.body.categoryIds]
         : [];
     const songs = readSongs();
-    if (!canPublishImmediately) {
+    if (!canAssignCategories) {
       const capacity = uploadCapacityFor(request.user, songs);
       if (capacity.freeApprovedUploadCount >= FREE_APPROVED_UPLOAD_LIMIT) {
         await removeUploadedFiles(request.files);
@@ -3471,18 +3501,6 @@ app.post(
           code: "FREE_APPROVED_CAPACITY_FULL",
           error:
             "Your live approved catalog is full (Max 100). Delete an approved song to unlock a new upload slot.",
-        });
-      }
-      if (
-        capacity.freePendingUploadCount +
-          reservationCount(pendingUploadReservations, request.user.id) >=
-        FREE_PENDING_UPLOAD_LIMIT
-      ) {
-        await removeUploadedFiles(request.files);
-        return response.status(409).json({
-          code: "FREE_PENDING_QUEUE_FULL",
-          error:
-            "Your pending review queue is full (Max 5). Wait for Admin approval.",
         });
       }
     }
@@ -3498,9 +3516,6 @@ app.post(
         error: categoryValidation.error,
       });
     }
-    const releasePendingReservation = !canPublishImmediately
-      ? reserveCapacity(pendingUploadReservations, request.user.id)
-      : () => {};
     let r2Audio = null;
     let r2Cover = null;
     if (R2_CONFIGURED) {
@@ -3512,7 +3527,6 @@ app.post(
         if (r2Audio?.key) await deleteR2Object(r2Audio.key).catch(() => {});
         if (r2Cover?.key) await deleteR2Object(r2Cover.key).catch(() => {});
         await removeUploadedFiles(request.files);
-        releasePendingReservation();
         console.error("R2 media upload failed:", error.message);
         return response.status(502).json({
           code: "R2_UPLOAD_FAILED",
@@ -3544,7 +3558,7 @@ app.post(
         ? `/covers/${encodeURIComponent(coverFile.filename)}`
         : null),
       r2CoverKey: r2Cover?.key || null,
-      status: canPublishImmediately ? "approved" : "pending",
+      status: "approved",
     };
     songs.push(song);
     try {
@@ -3554,12 +3568,10 @@ app.post(
       if (r2Audio?.key) await deleteR2Object(r2Audio.key).catch(() => {});
       if (r2Cover?.key) await deleteR2Object(r2Cover.key).catch(() => {});
       throw error;
-    } finally {
-      releasePendingReservation();
     }
     response.status(201).json({
       ...publicSong(song, request.user),
-      pendingReview: !canPublishImmediately,
+      pendingReview: false,
       uploadCapacity: uploadCapacityFor(request.user, songs),
     });
   },
@@ -3664,6 +3676,15 @@ app.delete("/api/songs/:id", auth, async (request, response) => {
       code: "MODERATION_REASON_REQUIRED",
       error: "Enter a reason for removing another user's content.",
     });
+  if ((song.r2AudioKey || song.r2CoverKey) && !R2_CONFIGURED)
+    return response.status(503).json({ error: "R2 must be configured before this song and its public media can be removed." });
+  try {
+    if (song.r2AudioKey) await deleteR2Object(song.r2AudioKey);
+    if (song.r2CoverKey) await deleteR2Object(song.r2CoverKey);
+  } catch (error) {
+    console.error("R2 song delete failed:", error.message);
+    return response.status(502).json({ error: "The R2 media could not be removed. Please retry." });
+  }
   const users = readUsers();
   if (isMasterAdmin && deletingAnotherUsersSong) {
     const contentOwner = users.find((user) => user.id === contentOwnerId);
@@ -3685,14 +3706,6 @@ app.delete("/api/songs/:id", auth, async (request, response) => {
     const safePath = path.join(MUSIC_DIR, path.basename(song.filename));
     if (fs.existsSync(safePath)) fs.unlinkSync(safePath);
   }
-  if (song.r2AudioKey)
-    await deleteR2Object(song.r2AudioKey).catch((error) =>
-      console.error("R2 audio delete failed:", error.message),
-    );
-  if (song.r2CoverKey)
-    await deleteR2Object(song.r2CoverKey).catch((error) =>
-      console.error("R2 cover delete failed:", error.message),
-    );
   if (song.coverFilename) {
     const safeCoverPath = path.join(
       COVERS_DIR,

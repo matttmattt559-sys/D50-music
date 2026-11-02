@@ -13,7 +13,7 @@
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" href="/icons/d50-icon-192.png" sizes="192x192" />
     <link rel="apple-touch-icon" href="/icons/d50-icon-180.png" sizes="180x180" />
-    <link rel="stylesheet" href="style.css?v=20261102-legal-29" />
+    <link rel="stylesheet" href="style.css?v=20261102-dsa-notices-31" />
     <link rel="stylesheet" href="group-subscription.css?v=20260920-1" />
   </head>
   <body class="dashboard-active main-app-container">
@@ -179,14 +179,6 @@
             Reports &amp; Bans
           </button>
           <button
-            id="freeUploadsButton"
-            class="free-uploads-button"
-            type="button"
-            hidden
-          >
-            📥 Free Uploads (<span id="freeUploadsCount">0</span>)
-          </button>
-          <button
             id="headerAccountIcon"
             class="header-account-icon"
             type="button"
@@ -228,6 +220,7 @@
           <a href="/legal/terms.html">Terms</a>
           <a href="/legal/privacy.html">Privacy</a>
           <a href="/legal/affiliate.html">Affiliate rules</a>
+          <a href="/legal/contact.html">DSA Contact &amp; Legal Notices</a>
         </nav>
       </section>
       <section id="search" hidden>
@@ -278,8 +271,8 @@
         <h1>Upload music</h1>
         <p>Audio is stored in D50's cloud media storage. Upload only tracks you have the rights to share.</p>
         <p id="freeUploadNotice" class="free-upload-notice" hidden>
-          Free accounts can keep up to 100 approved songs live and submit up to
-          5 tracks at a time for review.
+          Free accounts can publish up to 100 songs. Reported content may be
+          removed after review.
         </p>
         <p id="freeUploadCapacity" class="free-upload-capacity" hidden></p>
         <p id="bannedUploadNotice" class="free-upload-notice banned-upload-notice" hidden>
@@ -589,6 +582,15 @@
           </select>
           <label for="reportReasonInput">Why are you reporting this song?</label>
           <textarea id="reportReasonInput" maxlength="500" rows="5" placeholder="Write a clear reason…" required></textarea>
+          <p id="reportContentLocation" class="report-content-location"></p>
+          <label for="reportNoticeEmail">Your email for this notice</label>
+          <input id="reportNoticeEmail" type="email" maxlength="254" autocomplete="email" required />
+          <label for="reportElectronicSignature">Electronic Signature (Type your full legal name to verify this notice).</label>
+          <input id="reportElectronicSignature" type="text" minlength="2" maxlength="120" autocomplete="name" required />
+          <label class="report-declaration" for="reportUserDeclaration">
+            <input id="reportUserDeclaration" type="checkbox" required />
+            I confirm that the information in this notice is accurate and complete to the best of my knowledge.
+          </label>
           <button id="sendReportButton" class="primary-button" type="submit" disabled>Send Report</button>
         </form>
         <p id="reportSubmitMessage" class="form-message" aria-live="polite"></p>
@@ -692,6 +694,6 @@
       </div>
     </div>
     <script src="pwa.js?v=20260921-pwa-1"></script>
-    <script src="script.js?v=20261102-legal-29"></script>
+    <script src="script.js?v=20261102-dsa-notices-31"></script>
   </body>
 </html>
